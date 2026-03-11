@@ -57,9 +57,10 @@ class RuntimeConfig(Base):
     __tablename__ = "runtime_configs"
 
     id: Mapped[int] = mapped_column(primary_key=True, default=1)
-    model_base_url: Mapped[str] = mapped_column(String(255), default="https://open.bigmodel.cn/api/paas/v4")
-    model_name: Mapped[str] = mapped_column(String(128), default="glm-4.7-flash")
+    model_base_url: Mapped[str] = mapped_column(String(255), default="https://api.openai.com/v1")
+    model_name: Mapped[str] = mapped_column(String(128), default="gpt-5.4")
     model_api_key: Mapped[str] = mapped_column(Text, default="")
+    provider_mode: Mapped[str] = mapped_column(String(16), default="codex_cli")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

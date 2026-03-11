@@ -58,12 +58,35 @@ export type ModelConfigStatus = {
   configured: boolean
   base_url: string
   model_name: string
+  provider_mode: 'codex_cli' | 'oauth_cli' | 'http_api'
+  oauth_cli_available: boolean
+  oauth_logged_in: boolean
+  oauth_status_message: string
+  oauth_account_id?: string | null
+  mcp_available: boolean
+  mcp_status_message: string
 }
 
 export type ModelConfigRequest = {
-  base_url: string
-  api_key: string
-  model_name: string
+  provider_mode: 'codex_cli' | 'oauth_cli' | 'http_api'
+  base_url?: string
+  api_key?: string
+  model_name?: string
+}
+
+export type OAuthStatus = {
+  provider: string
+  cli_available: boolean
+  logged_in: boolean
+  status_message: string
+  account_id?: string | null
+  mcp_available: boolean
+  mcp_status_message: string
+}
+
+export type OAuthAction = {
+  ok: boolean
+  message: string
 }
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
@@ -109,5 +132,21 @@ export async function saveModelConfig(payload: ModelConfigRequest): Promise<Mode
   return callApi<ModelConfigStatus>('/api/v1/model-config', {
     method: 'POST',
     body: JSON.stringify(payload),
+  })
+}
+
+export async function getOAuthStatus(): Promise<OAuthStatus> {
+  return callApi<OAuthStatus>('/api/v1/auth/oauth/status')
+}
+
+export async function startOAuthLogin(): Promise<OAuthAction> {
+  return callApi<OAuthAction>('/api/v1/auth/oauth/login/start', {
+    method: 'POST',
+  })
+}
+
+export async function logoutOAuth(): Promise<OAuthAction> {
+  return callApi<OAuthAction>('/api/v1/auth/oauth/logout', {
+    method: 'POST',
   })
 }

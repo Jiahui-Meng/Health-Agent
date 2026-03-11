@@ -5,11 +5,14 @@ import {
   MessageItem,
   SessionItem,
   deleteSession,
+  getOAuthStatus,
   getMessages,
   getModelConfigStatus,
   getSessions,
+  logoutOAuth,
   postChat,
   saveModelConfig,
+  startOAuthLogin,
 } from './lib/api'
 
 type ParsedAssistant = ChatResponse['answer']
@@ -40,6 +43,8 @@ type UserDraft = {
 
 const BIGMODEL_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4'
 const BIGMODEL_DEFAULT_MODEL = 'glm-4.7-flash'
+const OPENAI_BASE_URL = 'https://api.openai.com/v1'
+const OPENAI_DEFAULT_MODEL = 'gpt-5.4'
 const USER_PROFILES_KEY = 'health_agent_user_profiles'
 const ACTIVE_USER_KEY = 'health_agent_active_user'
 
@@ -76,6 +81,14 @@ const UI_TEXT = {
     baseUrl: 'Base URL',
     modelName: '模型名称',
     apiKeyToken: 'API Key (Token)',
+    providerMode: '接入方式',
+    providerOAuth: 'Codex CLI (via MCP tools)',
+    providerHttp: 'HTTP API Key',
+    oauthLogin: '登录 Codex',
+    oauthLogout: '退出登录',
+    oauthRefresh: '刷新状态',
+    oauthStatus: 'Codex 状态',
+    oauthNeedLogin: '请先完成 Codex 登录，并确保 MCP 可用。',
     apiKeyPlaceholder: '输入你的 API Token',
     saveApiConfig: '保存 API 配置',
     saving: '保存中...',
@@ -96,7 +109,8 @@ const UI_TEXT = {
     newSession: '新建会话',
     delete: '删除',
     modalTitle: '连接你的大模型',
-    modalDesc: '后端尚未配置模型信息。请先填写 Base URL、模型名称和 API Key。',
+    modalDesc: '默认使用 Codex CLI + MCP tools。请先完成 Codex 登录；如需回退也可切换到 HTTP API。',
+    mcpStatus: 'MCP 状态',
     saveAndStart: '保存并开始',
     intakeTag: '问诊中',
     intakeHint: '请按下面问题补充信息，系统会在 3-5 轮后给出总结建议。',
@@ -139,6 +153,14 @@ const UI_TEXT = {
     baseUrl: 'Base URL',
     modelName: 'Model Name',
     apiKeyToken: 'API Key (Token)',
+    providerMode: 'Provider',
+    providerOAuth: 'Codex CLI (via MCP tools)',
+    providerHttp: 'HTTP API Key',
+    oauthLogin: 'Login Codex',
+    oauthLogout: 'Logout',
+    oauthRefresh: 'Refresh Status',
+    oauthStatus: 'Codex Status',
+    oauthNeedLogin: 'Please login with Codex first and ensure MCP is available.',
     apiKeyPlaceholder: 'your-api-token',
     saveApiConfig: 'Save API Config',
     saving: 'Saving...',
@@ -159,7 +181,8 @@ const UI_TEXT = {
     newSession: 'New Session',
     delete: 'Delete',
     modalTitle: 'Connect Your LLM',
-    modalDesc: 'Backend has no model configured yet. Enter Base URL, model name, and API key first.',
+    modalDesc: 'Default mode is Codex CLI with MCP tools. Login with Codex first, or switch to HTTP API as fallback.',
+    mcpStatus: 'MCP Status',
     saveAndStart: 'Save and Start',
     intakeTag: 'Intake',
     intakeHint: 'Please answer the questions below. A conclusion is generated after 3-5 rounds.',
@@ -297,11 +320,19 @@ export default function App() {
   const [showModelConfigModal, setShowModelConfigModal] = useState(false)
   const [showApiConfigForm, setShowApiConfigForm] = useState(false)
 
-  const [modelBaseUrl, setModelBaseUrl] = useState(BIGMODEL_BASE_URL)
-  const [modelName, setModelName] = useState(BIGMODEL_DEFAULT_MODEL)
+  const [providerMode, setProviderMode] = useState<'codex_cli' | 'http_api'>('codex_cli')
+  const [modelBaseUrl, setModelBaseUrl] = useState(OPENAI_BASE_URL)
+  const [modelName, setModelName] = useState(OPENAI_DEFAULT_MODEL)
   const [modelApiKey, setModelApiKey] = useState('')
   const [modelConfigError, setModelConfigError] = useState('')
   const [modelConfigSaving, setModelConfigSaving] = useState(false)
+  const [oauthCliAvailable, setOauthCliAvailable] = useState(false)
+  const [oauthLoggedIn, setOauthLoggedIn] = useState(false)
+  const [oauthStatusMessage, setOauthStatusMessage] = useState('')
+  const [oauthAccountId, setOauthAccountId] = useState<string | null>(null)
+  const [mcpAvailable, setMcpAvailable] = useState(false)
+  const [mcpStatusMessage, setMcpStatusMessage] = useState('')
+  const [oauthActionLoading, setOauthActionLoading] = useState(false)
 
   const activeProfile = useMemo(
     () => profiles.find((profile) => profile.username === activeUsername) || null,
@@ -359,9 +390,17 @@ export default function App() {
       setCheckingModelConfig(true)
       try {
         const status = await getModelConfigStatus()
-        setModelBaseUrl(status.base_url || BIGMODEL_BASE_URL)
-        setModelName(status.model_name || BIGMODEL_DEFAULT_MODEL)
+        const nextProvider = status.provider_mode === 'http_api' ? 'http_api' : 'codex_cli'
+        setProviderMode(nextProvider)
+        setModelBaseUrl(status.base_url || OPENAI_BASE_URL)
+        setModelName(status.model_name || OPENAI_DEFAULT_MODEL)
         setModelConfigured(status.configured)
+        setOauthCliAvailable(status.oauth_cli_available)
+        setOauthLoggedIn(status.oauth_logged_in)
+        setOauthStatusMessage(status.oauth_status_message || '')
+        setOauthAccountId(status.oauth_account_id || null)
+        setMcpAvailable(status.mcp_available)
+        setMcpStatusMessage(status.mcp_status_message || '')
         setShowModelConfigModal(!status.configured)
         setShowApiConfigForm(!status.configured)
       } catch (e) {
@@ -406,6 +445,49 @@ export default function App() {
     const data = await getMessages(targetSessionId)
     setMessages(data.messages.map((msg) => ({ ...msg })))
     setSessionId(targetSessionId)
+  }
+
+  async function refreshOAuthStatus() {
+    const status = await getOAuthStatus()
+    setOauthCliAvailable(status.cli_available)
+    setOauthLoggedIn(status.logged_in)
+    setOauthStatusMessage(status.status_message)
+    setOauthAccountId(status.account_id || null)
+    setMcpAvailable(status.mcp_available)
+    setMcpStatusMessage(status.mcp_status_message || '')
+    return status
+  }
+
+  async function onOAuthLogin() {
+    setModelConfigError('')
+    setOauthActionLoading(true)
+    try {
+      const result = await startOAuthLogin()
+      setOauthStatusMessage(result.message || oauthStatusMessage)
+      await refreshOAuthStatus()
+      const cfg = await getModelConfigStatus()
+      setModelConfigured(cfg.configured)
+      setShowModelConfigModal(!cfg.configured)
+    } catch (e) {
+      setModelConfigError((e as Error).message)
+    } finally {
+      setOauthActionLoading(false)
+    }
+  }
+
+  async function onOAuthLogout() {
+    setModelConfigError('')
+    setOauthActionLoading(true)
+    try {
+      const result = await logoutOAuth()
+      setOauthStatusMessage(result.message || oauthStatusMessage)
+      const status = await refreshOAuthStatus()
+      setModelConfigured(status.logged_in && status.mcp_available && providerMode === 'codex_cli')
+    } catch (e) {
+      setModelConfigError((e as Error).message)
+    } finally {
+      setOauthActionLoading(false)
+    }
   }
 
   function openCreateUserModal() {
@@ -464,8 +546,16 @@ export default function App() {
   }
 
   async function submitModelConfig() {
-    if (!modelBaseUrl.trim() || !modelName.trim() || !modelApiKey.trim()) {
+    if (!modelBaseUrl.trim() || !modelName.trim()) {
       setModelConfigError(t.fillApiError)
+      return false
+    }
+    if (providerMode === 'http_api' && !modelApiKey.trim()) {
+      setModelConfigError(t.fillApiError)
+      return false
+    }
+    if (providerMode === 'codex_cli' && (!oauthLoggedIn || !mcpAvailable)) {
+      setModelConfigError(t.oauthNeedLogin)
       return false
     }
 
@@ -473,14 +563,16 @@ export default function App() {
     setModelConfigSaving(true)
     try {
       const status = await saveModelConfig({
+        provider_mode: providerMode,
         base_url: modelBaseUrl.trim(),
         model_name: modelName.trim(),
-        api_key: modelApiKey.trim(),
+        api_key: providerMode === 'http_api' ? modelApiKey.trim() : '',
       })
       setModelConfigured(status.configured)
       setShowModelConfigModal(!status.configured)
-      setModelBaseUrl(status.base_url || BIGMODEL_BASE_URL)
-      setModelName(status.model_name || BIGMODEL_DEFAULT_MODEL)
+      setProviderMode(status.provider_mode === 'http_api' ? 'http_api' : 'codex_cli')
+      setModelBaseUrl(status.base_url || OPENAI_BASE_URL)
+      setModelName(status.model_name || OPENAI_DEFAULT_MODEL)
       setModelApiKey('')
       if (status.configured) {
         setShowApiConfigForm(false)
@@ -666,11 +758,31 @@ export default function App() {
                 }}
               >
                 <label>
+                  {t.providerMode}
+                  <select
+                    value={providerMode}
+                    onChange={(e) => {
+                      const next = e.target.value as 'codex_cli' | 'http_api'
+                      setProviderMode(next)
+                      if (next === 'codex_cli') {
+                        setModelBaseUrl(OPENAI_BASE_URL)
+                        setModelName(OPENAI_DEFAULT_MODEL)
+                      } else {
+                        setModelBaseUrl(BIGMODEL_BASE_URL)
+                        setModelName(BIGMODEL_DEFAULT_MODEL)
+                      }
+                    }}
+                  >
+                    <option value="codex_cli">{t.providerOAuth}</option>
+                    <option value="http_api">{t.providerHttp}</option>
+                  </select>
+                </label>
+                <label>
                   {t.baseUrl}
                   <input
                     value={modelBaseUrl}
                     onChange={(e) => setModelBaseUrl(e.target.value)}
-                    placeholder={BIGMODEL_BASE_URL}
+                    placeholder={providerMode === 'codex_cli' ? OPENAI_BASE_URL : BIGMODEL_BASE_URL}
                   />
                 </label>
                 <label>
@@ -678,18 +790,44 @@ export default function App() {
                   <input
                     value={modelName}
                     onChange={(e) => setModelName(e.target.value)}
-                    placeholder={BIGMODEL_DEFAULT_MODEL}
+                    placeholder={providerMode === 'codex_cli' ? OPENAI_DEFAULT_MODEL : BIGMODEL_DEFAULT_MODEL}
                   />
                 </label>
-                <label>
-                  {t.apiKeyToken}
-                  <input
-                    type="password"
-                    value={modelApiKey}
-                    onChange={(e) => setModelApiKey(e.target.value)}
-                    placeholder={t.apiKeyPlaceholder}
-                  />
-                </label>
+                {providerMode === 'http_api' && (
+                  <label>
+                    {t.apiKeyToken}
+                    <input
+                      type="password"
+                      value={modelApiKey}
+                      onChange={(e) => setModelApiKey(e.target.value)}
+                      placeholder={t.apiKeyPlaceholder}
+                    />
+                  </label>
+                )}
+                {providerMode === 'codex_cli' && (
+                  <div className="profile-summary">
+                      <p>
+                        {t.oauthStatus}: {oauthStatusMessage || '-'}
+                      </p>
+                      <p>CLI: {oauthCliAvailable ? 'available' : 'unavailable'}</p>
+                      <p>
+                        {t.mcpStatus}: {mcpAvailable ? 'available' : 'unavailable'}
+                        {mcpStatusMessage ? ` (${mcpStatusMessage})` : ''}
+                      </p>
+                      {oauthAccountId && <p>Account: {oauthAccountId}</p>}
+                    <div className="user-actions">
+                      <button type="button" onClick={onOAuthLogin} disabled={oauthActionLoading}>
+                        {t.oauthLogin}
+                      </button>
+                      <button type="button" onClick={onOAuthLogout} disabled={oauthActionLoading}>
+                        {t.oauthLogout}
+                      </button>
+                    </div>
+                    <button type="button" onClick={refreshOAuthStatus} disabled={oauthActionLoading}>
+                      {t.oauthRefresh}
+                    </button>
+                  </div>
+                )}
 
                 <button type="submit" disabled={modelConfigSaving}>
                   {modelConfigSaving ? t.saving : t.saveApiConfig}
@@ -887,11 +1025,31 @@ export default function App() {
             <p>{t.modalDesc}</p>
             <form onSubmit={onSaveModelConfig} className="grid">
               <label>
+                {t.providerMode}
+                <select
+                  value={providerMode}
+                  onChange={(e) => {
+                    const next = e.target.value as 'codex_cli' | 'http_api'
+                    setProviderMode(next)
+                    if (next === 'codex_cli') {
+                      setModelBaseUrl(OPENAI_BASE_URL)
+                      setModelName(OPENAI_DEFAULT_MODEL)
+                    } else {
+                      setModelBaseUrl(BIGMODEL_BASE_URL)
+                      setModelName(BIGMODEL_DEFAULT_MODEL)
+                    }
+                  }}
+                >
+                  <option value="codex_cli">{t.providerOAuth}</option>
+                  <option value="http_api">{t.providerHttp}</option>
+                </select>
+              </label>
+              <label>
                 {t.baseUrl}
                 <input
                   value={modelBaseUrl}
                   onChange={(e) => setModelBaseUrl(e.target.value)}
-                  placeholder={BIGMODEL_BASE_URL}
+                  placeholder={providerMode === 'codex_cli' ? OPENAI_BASE_URL : BIGMODEL_BASE_URL}
                 />
               </label>
               <label>
@@ -899,18 +1057,41 @@ export default function App() {
                 <input
                   value={modelName}
                   onChange={(e) => setModelName(e.target.value)}
-                  placeholder={BIGMODEL_DEFAULT_MODEL}
+                  placeholder={providerMode === 'codex_cli' ? OPENAI_DEFAULT_MODEL : BIGMODEL_DEFAULT_MODEL}
                 />
               </label>
-              <label>
-                {t.apiKeyToken}
-                <input
-                  type="password"
-                  value={modelApiKey}
-                  onChange={(e) => setModelApiKey(e.target.value)}
-                  placeholder={t.apiKeyPlaceholder}
-                />
-              </label>
+              {providerMode === 'http_api' && (
+                <label>
+                  {t.apiKeyToken}
+                  <input
+                    type="password"
+                    value={modelApiKey}
+                    onChange={(e) => setModelApiKey(e.target.value)}
+                    placeholder={t.apiKeyPlaceholder}
+                  />
+                </label>
+              )}
+              {providerMode === 'codex_cli' && (
+                <div className="profile-summary">
+                    <p>
+                      {t.oauthStatus}: {oauthStatusMessage || '-'}
+                    </p>
+                    <p>CLI: {oauthCliAvailable ? 'available' : 'unavailable'}</p>
+                    <p>
+                      {t.mcpStatus}: {mcpAvailable ? 'available' : 'unavailable'}
+                      {mcpStatusMessage ? ` (${mcpStatusMessage})` : ''}
+                    </p>
+                    {oauthAccountId && <p>Account: {oauthAccountId}</p>}
+                  <div className="user-actions">
+                    <button type="button" onClick={onOAuthLogin} disabled={oauthActionLoading}>
+                      {t.oauthLogin}
+                    </button>
+                    <button type="button" onClick={onOAuthLogout} disabled={oauthActionLoading}>
+                      {t.oauthLogout}
+                    </button>
+                  </div>
+                </div>
+              )}
 
               <button type="submit" disabled={modelConfigSaving}>
                 {modelConfigSaving ? t.saving : t.saveAndStart}

@@ -1,6 +1,8 @@
 from datetime import datetime
 import json
 import re
+from pathlib import Path
+import sys
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,13 +22,16 @@ from .schemas import (
     ModelConfigRequest,
     ModelConfigResponse,
     ModelConfigStatusResponse,
+    OAuthActionResponse,
+    OAuthStatusResponse,
     SessionItem,
     SessionListResponse,
 )
 from .services.context_builder import build_context
-from .services.model_adapter import ModelAdapter, ModelAPIError, normalize_model_base_url
+from .services.model_adapter import ModelAdapter, ModelAPIError, ModelResult, normalize_model_base_url
+from .services.codex_cli import CodexCliError, CodexCliService
 from .services.output_parser import parse_model_json
-from .services.prompt_builder import build_system_prompt, build_user_prompt
+from .services.prompt_builder import build_codex_mcp_prompt, build_system_prompt, build_user_prompt
 from .services.safety import (
     build_emergency_guidance,
     classify_risk,
@@ -34,6 +39,11 @@ from .services.safety import (
     max_risk,
 )
 from .services.summarizer import build_summary
+from .services.triage_runtime import (
+    apply_stage_rules as runtime_apply_stage_rules,
+    build_required_slots as runtime_build_required_slots,
+    choose_forced_stage as runtime_choose_forced_stage,
+)
 
 MIN_TRIAGE_ROUNDS = 3
 MAX_TRIAGE_ROUNDS = 5
@@ -63,11 +73,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         model_name=app_settings.model_name,
         timeout_seconds=app_settings.model_timeout_seconds,
     )
+    app.state.codex_cli_service = CodexCliService(
+        cli_bin=app_settings.codex_cli_bin or app_settings.oauth_cli_bin or "codex",
+        python_bin=sys.executable,
+        workspace_root=str(Path(__file__).resolve().parents[2]),
+        backend_root=str(Path(__file__).resolve().parents[1]),
+        database_url=app_settings.database_url,
+    )
 
     @app.on_event("startup")
     def startup() -> None:
         Base.metadata.create_all(bind=engine)
         _ensure_sessions_triage_columns(engine)
+        _ensure_runtime_config_columns(engine)
 
         with session_factory() as db:
             runtime_config = _ensure_runtime_config_row(db, app_settings)
@@ -86,34 +104,82 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get(f"{app_settings.api_prefix}/model-config/status", response_model=ModelConfigStatusResponse)
     def get_model_config_status(db: Session = Depends(db_dependency)) -> ModelConfigStatusResponse:
         runtime_config = _ensure_runtime_config_row(db, app_settings)
-        _sync_adapter_from_runtime(app.state.model_adapter, runtime_config)
+        codex_status = app.state.codex_cli_service.status()
+        mcp_available, mcp_message = app.state.codex_cli_service.mcp_status()
+        configured = _is_model_configured(runtime_config, codex_status.logged_in, mcp_available)
         return ModelConfigStatusResponse(
-            configured=app.state.model_adapter.is_configured(),
+            configured=configured,
             base_url=runtime_config.model_base_url,
             model_name=runtime_config.model_name,
+            provider_mode=runtime_config.provider_mode,
+            oauth_cli_available=codex_status.cli_available,
+            oauth_logged_in=codex_status.logged_in,
+            oauth_status_message=codex_status.message,
+            oauth_account_id=codex_status.account_id,
+            mcp_available=mcp_available,
+            mcp_status_message=mcp_message,
         )
 
     @app.post(f"{app_settings.api_prefix}/model-config", response_model=ModelConfigResponse)
     def save_model_config(payload: ModelConfigRequest, db: Session = Depends(db_dependency)) -> ModelConfigResponse:
         runtime_config = _ensure_runtime_config_row(db, app_settings)
-
-        runtime_config.model_base_url = normalize_model_base_url(payload.base_url)
-        runtime_config.model_api_key = payload.api_key.strip()
-        runtime_config.model_name = payload.model_name.strip()
+        if payload.base_url.strip():
+            runtime_config.model_base_url = normalize_model_base_url(payload.base_url)
+        if payload.model_name.strip():
+            runtime_config.model_name = payload.model_name.strip()
+        normalized_provider = _normalize_provider_mode(payload.provider_mode)
+        runtime_config.provider_mode = normalized_provider
+        if normalized_provider == "http_api":
+            runtime_config.model_api_key = payload.api_key.strip()
+        elif payload.api_key.strip():
+            # allow optional manual override
+            runtime_config.model_api_key = payload.api_key.strip()
 
         db.add(runtime_config)
         db.commit()
         db.refresh(runtime_config)
-
-        _sync_adapter_from_runtime(app.state.model_adapter, runtime_config)
+        codex_status = app.state.codex_cli_service.status()
+        mcp_available, _ = app.state.codex_cli_service.mcp_status()
         return ModelConfigResponse(
-            configured=app.state.model_adapter.is_configured(),
+            configured=_is_model_configured(runtime_config, codex_status.logged_in, mcp_available),
             base_url=runtime_config.model_base_url,
             model_name=runtime_config.model_name,
+            provider_mode=runtime_config.provider_mode,
         )
+
+    @app.get(f"{app_settings.api_prefix}/auth/oauth/status", response_model=OAuthStatusResponse)
+    def oauth_status() -> OAuthStatusResponse:
+        status = app.state.codex_cli_service.status()
+        mcp_available, mcp_message = app.state.codex_cli_service.mcp_status()
+        return OAuthStatusResponse(
+            provider="codex",
+            cli_available=status.cli_available,
+            logged_in=status.logged_in,
+            status_message=status.message,
+            account_id=status.account_id,
+            mcp_available=mcp_available,
+            mcp_status_message=mcp_message,
+        )
+
+    @app.post(f"{app_settings.api_prefix}/auth/oauth/login/start", response_model=OAuthActionResponse)
+    def oauth_login() -> OAuthActionResponse:
+        result = app.state.codex_cli_service.login()
+        status_code = 200 if result.ok else 502
+        if not result.ok:
+            raise HTTPException(status_code=status_code, detail=result.message)
+        return OAuthActionResponse(ok=result.ok, message=result.message)
+
+    @app.post(f"{app_settings.api_prefix}/auth/oauth/logout", response_model=OAuthActionResponse)
+    def oauth_logout() -> OAuthActionResponse:
+        result = app.state.codex_cli_service.logout()
+        status_code = 200 if result.ok else 502
+        if not result.ok:
+            raise HTTPException(status_code=status_code, detail=result.message)
+        return OAuthActionResponse(ok=result.ok, message=result.message)
 
     @app.post(f"{app_settings.api_prefix}/chat", response_model=ChatResponse)
     def chat(payload: ChatRequest, db: Session = Depends(db_dependency)) -> ChatResponse:
+        runtime_config = _ensure_runtime_config_row(db, app_settings)
         session_record = _get_or_create_session(db, payload)
         profile_changed = _merge_profile(session_record, payload.health_profile.model_dump() if payload.health_profile else None)
 
@@ -190,32 +256,47 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 recent_messages=context.recent_messages,
             )
             target_stage = forced_stage or current_stage
+            provider = _normalize_provider_mode(runtime_config.provider_mode)
             system_prompt = build_system_prompt(payload.locale, target_stage)
-            user_prompt = build_user_prompt(
-                locale=payload.locale,
-                message=payload.message,
-                profile=payload.health_profile,
-                long_summary=context.summary,
-                recent_messages=context.recent_messages,
-                triage_stage=target_stage,
-                triage_round_count=next_round,
-                max_rounds=MAX_TRIAGE_ROUNDS,
-                required_slots=required_slots,
-            )
+            if provider == "codex_cli":
+                user_prompt = build_codex_mcp_prompt(
+                    locale=payload.locale,
+                    session_id=session_record.id,
+                    device_id=payload.device_id,
+                    message=payload.message,
+                    triage_stage=target_stage,
+                    triage_round_count=next_round,
+                    max_rounds=MAX_TRIAGE_ROUNDS,
+                )
+            else:
+                user_prompt = build_user_prompt(
+                    locale=payload.locale,
+                    message=payload.message,
+                    profile=payload.health_profile,
+                    long_summary=context.summary,
+                    recent_messages=context.recent_messages,
+                    triage_stage=target_stage,
+                    triage_round_count=next_round,
+                    max_rounds=MAX_TRIAGE_ROUNDS,
+                    required_slots=required_slots,
+                )
             try:
-                model_result = app.state.model_adapter.generate(
+                model_result = _generate_model_result(
+                    runtime_config=runtime_config,
+                    codex_cli_service=app.state.codex_cli_service,
+                    model_adapter=app.state.model_adapter,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
                     ],
                     locale=payload.locale,
                 )
-            except ModelAPIError as exc:
+            except (ModelAPIError, CodexCliError) as exc:
                 raise HTTPException(
-                    status_code=exc.status_code,
+                    status_code=getattr(exc, "status_code", 502),
                     detail={
                         "message": str(exc),
-                        "hint": "Please verify model Base URL / API Key (Token) / model name.",
+                        "hint": "Please verify provider mode, Codex login status, model name, MCP availability, Base URL, and credentials.",
                     },
                 ) from exc
             answer = parse_model_json(model_result.content, payload.locale)
@@ -414,13 +495,30 @@ def _ensure_runtime_config_row(db: Session, settings: Settings) -> RuntimeConfig
             db.add(runtime_config)
             db.commit()
             db.refresh(runtime_config)
+        if not runtime_config.provider_mode:
+            runtime_config.provider_mode = settings.provider_mode
+            db.add(runtime_config)
+            db.commit()
+            db.refresh(runtime_config)
+        normalized_provider = _normalize_provider_mode(runtime_config.provider_mode)
+        if normalized_provider != runtime_config.provider_mode:
+            runtime_config.provider_mode = normalized_provider
+            db.add(runtime_config)
+            db.commit()
+            db.refresh(runtime_config)
+        if runtime_config.provider_mode == "codex_cli" and runtime_config.model_name in {"", "gpt-4.1-mini"}:
+            runtime_config.model_name = "gpt-5.4"
+            db.add(runtime_config)
+            db.commit()
+            db.refresh(runtime_config)
         return runtime_config
 
     runtime_config = RuntimeConfig(
         id=1,
         model_base_url=normalize_model_base_url(settings.model_base_url),
-        model_name=settings.model_name,
+        model_name="gpt-5.4" if _normalize_provider_mode(settings.provider_mode) == "codex_cli" else settings.model_name,
         model_api_key=settings.model_api_key,
+        provider_mode=_normalize_provider_mode(settings.provider_mode),
     )
     db.add(runtime_config)
     db.commit()
@@ -436,6 +534,68 @@ def _sync_adapter_from_runtime(adapter: ModelAdapter, runtime_config: RuntimeCon
     )
 
 
+def _sync_adapter_with_token(adapter: ModelAdapter, runtime_config: RuntimeConfig, token: str) -> None:
+    adapter.update_config(
+        base_url=runtime_config.model_base_url,
+        api_key=token,
+        model_name=runtime_config.model_name,
+    )
+
+
+def _is_model_configured(runtime_config: RuntimeConfig, codex_logged_in: bool, mcp_available: bool = True) -> bool:
+    provider = _normalize_provider_mode(runtime_config.provider_mode)
+    if provider == "codex_cli":
+        return codex_logged_in and mcp_available
+    return bool(runtime_config.model_api_key.strip())
+
+
+def _normalize_provider_mode(provider_mode: str | None) -> str:
+    normalized = (provider_mode or "").strip().lower()
+    if normalized == "oauth_cli":
+        return "codex_cli"
+    if normalized in {"codex_cli", "http_api"}:
+        return normalized
+    return "codex_cli"
+
+
+def _generate_model_result(
+    runtime_config: RuntimeConfig,
+    codex_cli_service: CodexCliService,
+    model_adapter: ModelAdapter,
+    messages: list[dict[str, str]],
+    locale: str,
+):
+    provider = _normalize_provider_mode(runtime_config.provider_mode)
+
+    if provider == "http_api":
+        if not runtime_config.model_api_key.strip():
+            raise ModelAPIError(
+                "HTTP API mode requires API Key (Token). Please save model config first.",
+                status_code=400,
+            )
+        _sync_adapter_with_token(model_adapter, runtime_config, runtime_config.model_api_key)
+        return model_adapter.generate(messages=messages, locale=locale)
+
+    status = codex_cli_service.status()
+    if not status.cli_available:
+        raise CodexCliError(status.message, status_code=400)
+    if not status.logged_in:
+        raise CodexCliError("Codex CLI is not logged in. Please run login first.", status_code=401)
+
+    prompt_blocks: list[str] = []
+    for msg in messages:
+        role = msg.get("role", "user").upper()
+        content = msg.get("content", "")
+        prompt_blocks.append(f"{role}:\n{content}")
+    prompt_text = "\n\n".join(prompt_blocks).strip()
+    content = codex_cli_service.exec_with_mcp(
+        prompt=prompt_text,
+        model_name=runtime_config.model_name or None,
+    )
+
+    return ModelResult(content=content, model=runtime_config.model_name or "codex-cli")
+
+
 def _ensure_sessions_triage_columns(engine) -> None:
     inspector = inspect(engine)
     columns = {col["name"] for col in inspector.get_columns("sessions")}
@@ -448,44 +608,28 @@ def _ensure_sessions_triage_columns(engine) -> None:
             conn.execute(text("UPDATE sessions SET triage_round_count = 0 WHERE triage_round_count IS NULL"))
 
 
+def _ensure_runtime_config_columns(engine) -> None:
+    inspector = inspect(engine)
+    columns = {col["name"] for col in inspector.get_columns("runtime_configs")}
+    with engine.begin() as conn:
+        if "provider_mode" not in columns:
+            conn.execute(text("ALTER TABLE runtime_configs ADD COLUMN provider_mode VARCHAR(16) DEFAULT 'codex_cli'"))
+            conn.execute(text("UPDATE runtime_configs SET provider_mode = 'codex_cli' WHERE provider_mode IS NULL"))
+        conn.execute(text("UPDATE runtime_configs SET provider_mode = 'codex_cli' WHERE provider_mode = 'oauth_cli'"))
+        conn.execute(
+            text(
+                "UPDATE runtime_configs SET model_name = 'gpt-5.4' "
+                "WHERE provider_mode = 'codex_cli' AND (model_name IS NULL OR model_name = '' OR model_name = 'gpt-4.1-mini')"
+            )
+        )
+
+
 def _choose_forced_stage(current_stage: str, next_round: int) -> str | None:
-    if current_stage == "conclusion":
-        return "conclusion"
-    if next_round < MIN_TRIAGE_ROUNDS:
-        return "intake"
-    if next_round >= MAX_TRIAGE_ROUNDS:
-        return "conclusion"
-    return None
+    return runtime_choose_forced_stage(current_stage, next_round)
 
 
 def _apply_stage_rules(answer: dict, locale: str, round_count: int) -> dict:
-    stage = answer.get("stage") or "conclusion"
-
-    if round_count < MIN_TRIAGE_ROUNDS:
-        stage = "intake"
-    elif round_count >= MAX_TRIAGE_ROUNDS and stage == "intake":
-        stage = "conclusion"
-        if locale.startswith("zh"):
-            answer["summary"] = "已完成多轮线上问诊，信息仍不足以安全判断，建议尽快线下就医评估。"
-            answer["next_steps"] = [
-                "请尽快到线下门诊或急诊就医，由医生完成查体和必要检查。",
-                "携带症状变化记录（起病时间、体温、疼痛程度、诱因和缓解因素）。",
-            ]
-        else:
-            answer["summary"] = "After multiple online triage rounds, available information is still insufficient for a safe conclusion."
-            answer["next_steps"] = [
-                "Arrange in-person medical evaluation promptly for physical examination and testing.",
-                "Bring a short symptom log (onset, severity trend, triggers, and relieving factors).",
-            ]
-
-    answer["stage"] = stage
-    if stage == "intake":
-        follow_ups = answer.get("follow_up_questions") or []
-        answer["follow_up_questions"] = [str(q).strip() for q in follow_ups if str(q).strip()][:3]
-        answer["next_steps"] = []
-    else:
-        answer["follow_up_questions"] = None
-    return answer
+    return runtime_apply_stage_rules(answer, locale, round_count)
 
 
 def _build_required_slots(
@@ -494,50 +638,7 @@ def _build_required_slots(
     health_profile: dict,
     recent_messages: list[dict[str, str]],
 ) -> list[str]:
-    text_pool = [current_message]
-    for msg in recent_messages:
-        if msg.get("role") == "user":
-            text_pool.append(msg.get("content", ""))
-    text_blob = " ".join(text_pool).lower()
-    has_history = bool(health_profile.get("conditions") or health_profile.get("medications") or health_profile.get("allergies"))
-
-    slots: list[tuple[str, bool]] = [
-        ("symptom_site", bool(re.search(r"(喉|咽|胸|腹|头|胃|背|arm|chest|throat|abdomen|head|stomach|back)", text_blob))),
-        ("severity", bool(re.search(r"(严重|剧烈|轻微|中等|分|pain scale|severe|mild|moderate|\\d+/10)", text_blob))),
-        (
-            "onset_time",
-            bool(
-                re.search(
-                    r"(今天|昨天|今早|昨晚|天前|周前|月前|小时|分钟|day|days|week|weeks|month|months|hour|hours|since)",
-                    text_blob,
-                )
-            ),
-        ),
-        ("associated_symptoms", bool(re.search(r"(伴|同时|还有|并且|with|also|together)", text_blob))),
-        ("red_flags", bool(re.search(r"(胸痛|呼吸困难|晕厥|抽搐|便血|chest pain|breathing|faint|seizure|blood)", text_blob))),
-        ("relevant_history", has_history),
-    ]
-
-    mapping_zh = {
-        "symptom_site": "症状部位",
-        "severity": "严重程度",
-        "onset_time": "起病时间",
-        "associated_symptoms": "伴随症状",
-        "red_flags": "危险信号",
-        "relevant_history": "既往史相关信息",
-    }
-    mapping_en = {
-        "symptom_site": "symptom location",
-        "severity": "severity",
-        "onset_time": "onset timing",
-        "associated_symptoms": "associated symptoms",
-        "red_flags": "danger signs",
-        "relevant_history": "relevant medical history",
-    }
-    mapping = mapping_zh if locale.startswith("zh") else mapping_en
-
-    missing = [mapping[key] for key, filled in slots if not filled]
-    return missing[:4]
+    return runtime_build_required_slots(locale, current_message, health_profile, recent_messages)
 
 
 app = create_app()

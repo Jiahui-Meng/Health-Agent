@@ -1,7 +1,7 @@
 import json
 
 from app.schemas import HealthProfile
-from app.services.prompt_builder import build_system_prompt, build_user_prompt
+from app.services.prompt_builder import build_codex_mcp_prompt, build_system_prompt, build_user_prompt
 
 
 def test_build_system_prompt_bilingual():
@@ -39,3 +39,19 @@ def test_build_user_prompt_contains_profile_and_context():
     assert data["recent_messages"][0]["content"] == "cough started on Monday"
     assert data["triage_stage"] == "intake"
     assert data["triage_round_count"] == 2
+
+
+def test_build_codex_mcp_prompt_contains_tool_instructions():
+    prompt = build_codex_mcp_prompt(
+        locale="en-US",
+        session_id="session-1",
+        device_id="device-1",
+        message="I have a sore throat",
+        triage_stage="intake",
+        triage_round_count=2,
+        max_rounds=5,
+    )
+    data = json.loads(prompt)
+    assert data["session_id"] == "session-1"
+    assert any("get_session_context" in rule for rule in data["rules"])
+    assert data["triage_stage"] == "intake"

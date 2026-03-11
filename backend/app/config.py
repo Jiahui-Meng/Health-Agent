@@ -11,10 +11,14 @@ class Settings(BaseSettings):
     api_prefix: str = "/api/v1"
     database_url: str = "postgresql+psycopg://postgres:postgres@postgres:5432/health_agent"
 
-    model_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
+    model_base_url: str = "https://api.openai.com/v1"
     model_api_key: str = ""
-    model_name: str = "glm-4.7-flash"
+    model_name: str = "gpt-5.4"
+    provider_mode: str = "codex_cli"
+    codex_cli_bin: str = "codex"
+    oauth_cli_bin: str = "codex"
     model_timeout_seconds: int = 45
+    mcp_mode: str = "stdio"
 
     context_turn_limit: int = 6
     max_context_chars: int = 5000

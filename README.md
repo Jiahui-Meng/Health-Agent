@@ -5,7 +5,7 @@ Health Agent is a health-focused AI agent inspired by openclaw's gateway/runtime
 It supports:
 - Free-text symptom input + structured health profile fields
 - Risk triage (`low|medium|high|emergency`) with strict safety rules
-- OpenAI-compatible HTTP model API (BigModel default)
+- OpenAI Codex CLI login with built-in MCP tools (default) + HTTP API fallback
 - First-open model setup UI
 - Anonymous long-term local history (device-based, no login)
 - Session/message APIs for retrieval and deletion
@@ -22,9 +22,11 @@ It supports:
 1. Optional envs:
 
 ```bash
-export HEALTH_AGENT_MODEL_BASE_URL="https://open.bigmodel.cn/api/paas/v4"
-export HEALTH_AGENT_MODEL_API_KEY="<your_token>"
-export HEALTH_AGENT_MODEL_NAME="glm-4.7-flash"
+export HEALTH_AGENT_PROVIDER_MODE="codex_cli"
+export HEALTH_AGENT_CODEX_CLI_BIN="codex"
+export HEALTH_AGENT_MCP_MODE="stdio"
+export HEALTH_AGENT_MODEL_BASE_URL="https://api.openai.com/v1"
+export HEALTH_AGENT_MODEL_NAME="gpt-5.4"
 ```
 
 2. Start all services:
@@ -46,6 +48,7 @@ cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+codex login
 uvicorn app.main:app --reload --port 8000
 ```
 
@@ -101,9 +104,16 @@ Returns runtime model config status:
 
 ```json
 {
-  "configured": true,
-  "base_url": "https://open.bigmodel.cn/api/paas/v4",
-  "model_name": "glm-4.7-flash"
+  "configured": false,
+  "base_url": "https://api.openai.com/v1",
+  "model_name": "gpt-5.4",
+  "provider_mode": "codex_cli",
+  "oauth_cli_available": true,
+  "oauth_logged_in": false,
+  "oauth_status_message": "Codex CLI is not logged in.",
+  "oauth_account_id": null,
+  "mcp_available": true,
+  "mcp_status_message": "MCP server is ready."
 }
 ```
 
@@ -112,6 +122,7 @@ Set model config:
 
 ```json
 {
+  "provider_mode": "http_api",
   "base_url": "https://open.bigmodel.cn/api/paas/v4",
   "api_key": "<your_token>",
   "model_name": "glm-4.7-flash"
@@ -119,6 +130,14 @@ Set model config:
 ```
 
 Tip: if you provide an endpoint ending with `/chat/completions`, backend auto-normalizes to base URL.
+
+### OAuth APIs
+
+- `GET /api/v1/auth/oauth/status`
+- `POST /api/v1/auth/oauth/login/start`
+- `POST /api/v1/auth/oauth/logout`
+
+In `codex_cli` mode, the backend invokes `codex exec` with an internal stdio MCP server. The MCP tools expose session context, risk analysis, and response planning, while the FastAPI backend remains the source of truth for safety checks and persistence.
 
 ## Safety Strategy (Strict)
 

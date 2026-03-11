@@ -1,19 +1,23 @@
 import json
+from types import SimpleNamespace
 
 from app.services.model_adapter import ModelAPIError, ModelResult
 
 
-BIGMODEL_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
-BIGMODEL_MODEL_NAME = "glm-4.7-flash"
+HTTP_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
+HTTP_MODEL_NAME = "glm-4.7-flash"
+OAUTH_DEFAULT_BASE_URL = "https://api.openai.com/v1"
+OAUTH_DEFAULT_MODEL_NAME = "gpt-5.4"
 
 
 def _configure_model(client):
     update = client.post(
         "/api/v1/model-config",
         json={
-            "base_url": BIGMODEL_BASE_URL,
+            "base_url": HTTP_BASE_URL,
+            "provider_mode": "http_api",
             "api_key": "test-key",
-            "model_name": BIGMODEL_MODEL_NAME,
+            "model_name": HTTP_MODEL_NAME,
         },
     )
     assert update.status_code == 200
@@ -37,7 +41,7 @@ def _mock_model_success(client):
                 },
                 ensure_ascii=False,
             ),
-            model=BIGMODEL_MODEL_NAME,
+            model=HTTP_MODEL_NAME,
         )
 
     client.app.state.model_adapter.generate = fake_generate
@@ -91,16 +95,19 @@ def test_chat_flow_and_session_history(client):
 def test_model_config_setup_flow(client):
     status_before = client.get("/api/v1/model-config/status")
     assert status_before.status_code == 200
-    assert status_before.json()["configured"] is False
-    assert status_before.json()["base_url"] == BIGMODEL_BASE_URL
-    assert status_before.json()["model_name"] == BIGMODEL_MODEL_NAME
+    assert isinstance(status_before.json()["configured"], bool)
+    assert status_before.json()["base_url"] == OAUTH_DEFAULT_BASE_URL
+    assert status_before.json()["model_name"] == OAUTH_DEFAULT_MODEL_NAME
+    assert status_before.json()["provider_mode"] == "codex_cli"
+    assert "mcp_available" in status_before.json()
 
     update = client.post(
         "/api/v1/model-config",
         json={
-            "base_url": BIGMODEL_BASE_URL,
+            "base_url": HTTP_BASE_URL,
+            "provider_mode": "http_api",
             "api_key": "test-key",
-            "model_name": BIGMODEL_MODEL_NAME,
+            "model_name": HTTP_MODEL_NAME,
         },
     )
     assert update.status_code == 200
@@ -109,7 +116,7 @@ def test_model_config_setup_flow(client):
     status_after = client.get("/api/v1/model-config/status")
     assert status_after.status_code == 200
     assert status_after.json()["configured"] is True
-    assert status_after.json()["model_name"] == BIGMODEL_MODEL_NAME
+    assert status_after.json()["model_name"] == HTTP_MODEL_NAME
 
 
 def test_model_config_normalizes_chat_completions_suffix(client):
@@ -117,16 +124,46 @@ def test_model_config_normalizes_chat_completions_suffix(client):
         "/api/v1/model-config",
         json={
             "base_url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+            "provider_mode": "http_api",
             "api_key": "test-key",
-            "model_name": BIGMODEL_MODEL_NAME,
+            "model_name": HTTP_MODEL_NAME,
         },
     )
     assert update.status_code == 200
-    assert update.json()["base_url"] == BIGMODEL_BASE_URL
+    assert update.json()["base_url"] == HTTP_BASE_URL
 
     status = client.get("/api/v1/model-config/status")
     assert status.status_code == 200
-    assert status.json()["base_url"] == BIGMODEL_BASE_URL
+    assert status.json()["base_url"] == HTTP_BASE_URL
+
+
+def test_model_config_maps_legacy_oauth_cli_to_codex_cli(client):
+    update = client.post(
+        "/api/v1/model-config",
+        json={
+            "provider_mode": "oauth_cli",
+            "base_url": OAUTH_DEFAULT_BASE_URL,
+            "model_name": OAUTH_DEFAULT_MODEL_NAME,
+        },
+    )
+    assert update.status_code == 200
+    assert update.json()["provider_mode"] == "codex_cli"
+
+
+def test_model_config_migrates_old_codex_default_model(client):
+    update = client.post(
+        "/api/v1/model-config",
+        json={
+            "provider_mode": "codex_cli",
+            "base_url": OAUTH_DEFAULT_BASE_URL,
+            "model_name": "gpt-4.1-mini",
+        },
+    )
+    assert update.status_code == 200
+
+    status = client.get("/api/v1/model-config/status")
+    assert status.status_code == 200
+    assert status.json()["model_name"] == "gpt-5.4"
 
 
 def test_model_call_failure_returns_clear_error(client):
@@ -154,6 +191,38 @@ def test_model_call_failure_returns_clear_error(client):
     detail = response.json()["detail"]
     assert "authentication failed" in detail["message"].lower()
     assert "hint" in detail
+
+
+def test_codex_cli_chat_failure_surfaces_mcp_hint(client):
+    def fake_status():
+        return SimpleNamespace(cli_available=True, logged_in=True, message="Logged in", account_id=None)
+
+    def fake_mcp_status():
+        return True, "MCP server is ready."
+
+    def fail_exec(prompt, model_name, timeout_seconds=90):
+        del prompt, model_name, timeout_seconds
+        from app.services.codex_cli import CodexCliError
+
+        raise CodexCliError("MCP server/tool error: tool call failed", status_code=502)
+
+    client.app.state.codex_cli_service.status = fake_status
+    client.app.state.codex_cli_service.mcp_status = fake_mcp_status
+    client.app.state.codex_cli_service.exec_with_mcp = fail_exec
+
+    response = client.post(
+        "/api/v1/chat",
+        json={
+            "device_id": "device-codex-001",
+            "locale": "en-US",
+            "region_code": "US",
+            "message": "mild headache for two days",
+        },
+    )
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert "mcp" in detail["message"].lower()
+    assert "mcp availability" in detail["hint"].lower()
 
 
 def test_emergency_triage(client):
@@ -219,7 +288,7 @@ def test_triage_progresses_from_intake_to_conclusion_by_round(client):
                 "stage": "intake",
                 "follow_up_questions": ["仍需补充更多信息。"],
             }
-        return ModelResult(content=json.dumps(payload, ensure_ascii=False), model=BIGMODEL_MODEL_NAME)
+        return ModelResult(content=json.dumps(payload, ensure_ascii=False), model=HTTP_MODEL_NAME)
 
     client.app.state.model_adapter.generate = staged_generate
 

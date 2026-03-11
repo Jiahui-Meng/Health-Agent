@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 RiskLevel = Literal["low", "medium", "high", "emergency"]
 TriageStage = Literal["intake", "conclusion"]
+ProviderMode = Literal["codex_cli", "oauth_cli", "http_api"]
 
 
 class HealthProfile(BaseModel):
@@ -79,15 +80,39 @@ class ModelConfigStatusResponse(BaseModel):
     configured: bool
     base_url: str
     model_name: str
+    provider_mode: ProviderMode = "codex_cli"
+    oauth_cli_available: bool = False
+    oauth_logged_in: bool = False
+    oauth_status_message: str = ""
+    oauth_account_id: str | None = None
+    mcp_available: bool = False
+    mcp_status_message: str = ""
 
 
 class ModelConfigRequest(BaseModel):
-    base_url: str = Field(min_length=1)
-    api_key: str = Field(min_length=1)
-    model_name: str = Field(min_length=1)
+    provider_mode: ProviderMode = "codex_cli"
+    base_url: str = ""
+    api_key: str = ""
+    model_name: str = ""
 
 
 class ModelConfigResponse(BaseModel):
     configured: bool
     base_url: str
     model_name: str
+    provider_mode: ProviderMode = "codex_cli"
+
+
+class OAuthStatusResponse(BaseModel):
+    provider: str = "codex"
+    cli_available: bool
+    logged_in: bool
+    status_message: str
+    account_id: str | None = None
+    mcp_available: bool = False
+    mcp_status_message: str = ""
+
+
+class OAuthActionResponse(BaseModel):
+    ok: bool
+    message: str

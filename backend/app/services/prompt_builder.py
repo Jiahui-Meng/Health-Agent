@@ -77,3 +77,58 @@ def build_user_prompt(
         },
     }
     return json.dumps(payload, ensure_ascii=False)
+
+
+def build_codex_mcp_prompt(
+    *,
+    locale: str,
+    session_id: str,
+    device_id: str,
+    message: str,
+    triage_stage: str,
+    triage_round_count: int,
+    max_rounds: int,
+) -> str:
+    if locale.startswith("zh"):
+        return json.dumps(
+            {
+                "task": "你正在为 Health Agent 生成一次受控医疗分诊回复。",
+                "rules": [
+                    "必须先调用 get_session_context 读取上下文。",
+                    "必须调用 analyze_health_input 分析当前消息。",
+                    "必须调用 build_health_response_plan 确认本轮应为 intake 还是 conclusion。",
+                    "不要调用 persist_chat_turn；宿主应用会在最终 JSON 通过校验后自行落库。",
+                    "最终输出必须严格符合 JSON 契约，不要输出 markdown。",
+                    "禁止诊断结论、禁止处方和剂量建议。",
+                ],
+                "session_id": session_id,
+                "device_id": device_id,
+                "locale": locale,
+                "current_message": message,
+                "triage_stage": triage_stage,
+                "triage_round_count": triage_round_count,
+                "max_rounds": max_rounds,
+            },
+            ensure_ascii=False,
+        )
+    return json.dumps(
+        {
+            "task": "Generate one controlled medical triage response for Health Agent.",
+            "rules": [
+                "Call get_session_context first.",
+                "Call analyze_health_input for the current user message.",
+                "Call build_health_response_plan to confirm whether this round is intake or conclusion.",
+                "Do not call persist_chat_turn; the host application persists the final validated response.",
+                "Final output must strictly match the JSON contract with no markdown.",
+                "Do not provide diagnosis, prescriptions, or dosage instructions.",
+            ],
+            "session_id": session_id,
+            "device_id": device_id,
+            "locale": locale,
+            "current_message": message,
+            "triage_stage": triage_stage,
+            "triage_round_count": triage_round_count,
+            "max_rounds": max_rounds,
+        },
+        ensure_ascii=False,
+    )
