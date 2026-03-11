@@ -1,0 +1,50 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: health-agent-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: health_agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d health_agent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build:
+      context: ./backend
+    container_name: health-agent-backend
+    environment:
+      HEALTH_AGENT_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/health_agent
+      HEALTH_AGENT_MODEL_BASE_URL: ${HEALTH_AGENT_MODEL_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}
+      HEALTH_AGENT_MODEL_API_KEY: ${HEALTH_AGENT_MODEL_API_KEY:-}
+      HEALTH_AGENT_MODEL_NAME: ${HEALTH_AGENT_MODEL_NAME:-glm-4.7-flash}
+      HEALTH_AGENT_MODEL_TIMEOUT_SECONDS: ${HEALTH_AGENT_MODEL_TIMEOUT_SECONDS:-45}
+      HEALTH_AGENT_CONTEXT_TURN_LIMIT: 6
+      HEALTH_AGENT_MAX_CONTEXT_CHARS: 5000
+      HEALTH_AGENT_CORS_ORIGINS: '["http://localhost:5173"]'
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: health-agent-frontend
+    environment:
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
