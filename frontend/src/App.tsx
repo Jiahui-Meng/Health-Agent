@@ -45,6 +45,12 @@ const BIGMODEL_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4'
 const BIGMODEL_DEFAULT_MODEL = 'glm-4.7-flash'
 const OPENAI_BASE_URL = 'https://api.openai.com/v1'
 const OPENAI_DEFAULT_MODEL = 'gpt-5.4'
+const CODEX_MODEL_OPTIONS = [
+  { value: 'gpt-5.4', label: 'gpt-5.4 (Recommended)' },
+  { value: 'gpt-5.3-codex', label: 'gpt-5.3-codex' },
+  { value: 'gpt-5.3-codex-spark', label: 'gpt-5.3-codex-spark (ChatGPT Pro preview)' },
+  { value: 'gpt-5.1-codex-max', label: 'gpt-5.1-codex-max' },
+] as const
 const USER_PROFILES_KEY = 'health_agent_user_profiles'
 const ACTIVE_USER_KEY = 'health_agent_active_user'
 
@@ -80,6 +86,7 @@ const UI_TEXT = {
     statusNotConfigured: '未配置',
     baseUrl: 'Base URL',
     modelName: '模型名称',
+    codexModel: 'Codex 模型',
     apiKeyToken: 'API Key (Token)',
     providerMode: '接入方式',
     providerOAuth: 'Codex CLI (via MCP tools)',
@@ -152,6 +159,7 @@ const UI_TEXT = {
     statusNotConfigured: 'Not configured',
     baseUrl: 'Base URL',
     modelName: 'Model Name',
+    codexModel: 'Codex Model',
     apiKeyToken: 'API Key (Token)',
     providerMode: 'Provider',
     providerOAuth: 'Codex CLI (via MCP tools)',
@@ -546,7 +554,11 @@ export default function App() {
   }
 
   async function submitModelConfig() {
-    if (!modelBaseUrl.trim() || !modelName.trim()) {
+    if (providerMode === 'http_api' && (!modelBaseUrl.trim() || !modelName.trim())) {
+      setModelConfigError(t.fillApiError)
+      return false
+    }
+    if (providerMode === 'codex_cli' && !modelName.trim()) {
       setModelConfigError(t.fillApiError)
       return false
     }
@@ -564,7 +576,7 @@ export default function App() {
     try {
       const status = await saveModelConfig({
         provider_mode: providerMode,
-        base_url: modelBaseUrl.trim(),
+        base_url: providerMode === 'http_api' ? modelBaseUrl.trim() : '',
         model_name: modelName.trim(),
         api_key: providerMode === 'http_api' ? modelApiKey.trim() : '',
       })
@@ -777,22 +789,37 @@ export default function App() {
                     <option value="http_api">{t.providerHttp}</option>
                   </select>
                 </label>
-                <label>
-                  {t.baseUrl}
-                  <input
-                    value={modelBaseUrl}
-                    onChange={(e) => setModelBaseUrl(e.target.value)}
-                    placeholder={providerMode === 'codex_cli' ? OPENAI_BASE_URL : BIGMODEL_BASE_URL}
-                  />
-                </label>
-                <label>
-                  {t.modelName}
-                  <input
-                    value={modelName}
-                    onChange={(e) => setModelName(e.target.value)}
-                    placeholder={providerMode === 'codex_cli' ? OPENAI_DEFAULT_MODEL : BIGMODEL_DEFAULT_MODEL}
-                  />
-                </label>
+                {providerMode === 'http_api' && (
+                  <label>
+                    {t.baseUrl}
+                    <input
+                      value={modelBaseUrl}
+                      onChange={(e) => setModelBaseUrl(e.target.value)}
+                      placeholder={BIGMODEL_BASE_URL}
+                    />
+                  </label>
+                )}
+                {providerMode === 'codex_cli' ? (
+                  <label>
+                    {t.codexModel}
+                    <select value={modelName} onChange={(e) => setModelName(e.target.value)}>
+                      {CODEX_MODEL_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : (
+                  <label>
+                    {t.modelName}
+                    <input
+                      value={modelName}
+                      onChange={(e) => setModelName(e.target.value)}
+                      placeholder={BIGMODEL_DEFAULT_MODEL}
+                    />
+                  </label>
+                )}
                 {providerMode === 'http_api' && (
                   <label>
                     {t.apiKeyToken}
@@ -1024,42 +1051,57 @@ export default function App() {
             <h2>{t.modalTitle}</h2>
             <p>{t.modalDesc}</p>
             <form onSubmit={onSaveModelConfig} className="grid">
-              <label>
-                {t.providerMode}
-                <select
-                  value={providerMode}
-                  onChange={(e) => {
-                    const next = e.target.value as 'codex_cli' | 'http_api'
-                    setProviderMode(next)
-                    if (next === 'codex_cli') {
-                      setModelBaseUrl(OPENAI_BASE_URL)
-                      setModelName(OPENAI_DEFAULT_MODEL)
-                    } else {
-                      setModelBaseUrl(BIGMODEL_BASE_URL)
-                      setModelName(BIGMODEL_DEFAULT_MODEL)
-                    }
+                <label>
+                  {t.providerMode}
+                  <select
+                    value={providerMode}
+                    onChange={(e) => {
+                      const next = e.target.value as 'codex_cli' | 'http_api'
+                      setProviderMode(next)
+                      if (next === 'codex_cli') {
+                        setModelBaseUrl(OPENAI_BASE_URL)
+                        setModelName(OPENAI_DEFAULT_MODEL)
+                      } else {
+                        setModelBaseUrl(BIGMODEL_BASE_URL)
+                        setModelName(BIGMODEL_DEFAULT_MODEL)
+                      }
                   }}
                 >
                   <option value="codex_cli">{t.providerOAuth}</option>
                   <option value="http_api">{t.providerHttp}</option>
                 </select>
               </label>
-              <label>
-                {t.baseUrl}
-                <input
-                  value={modelBaseUrl}
-                  onChange={(e) => setModelBaseUrl(e.target.value)}
-                  placeholder={providerMode === 'codex_cli' ? OPENAI_BASE_URL : BIGMODEL_BASE_URL}
-                />
-              </label>
-              <label>
-                {t.modelName}
-                <input
-                  value={modelName}
-                  onChange={(e) => setModelName(e.target.value)}
-                  placeholder={providerMode === 'codex_cli' ? OPENAI_DEFAULT_MODEL : BIGMODEL_DEFAULT_MODEL}
-                />
-              </label>
+                {providerMode === 'http_api' && (
+                  <label>
+                    {t.baseUrl}
+                    <input
+                      value={modelBaseUrl}
+                      onChange={(e) => setModelBaseUrl(e.target.value)}
+                      placeholder={BIGMODEL_BASE_URL}
+                    />
+                  </label>
+                )}
+                {providerMode === 'codex_cli' ? (
+                  <label>
+                    {t.codexModel}
+                    <select value={modelName} onChange={(e) => setModelName(e.target.value)}>
+                      {CODEX_MODEL_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : (
+                  <label>
+                    {t.modelName}
+                    <input
+                      value={modelName}
+                      onChange={(e) => setModelName(e.target.value)}
+                      placeholder={BIGMODEL_DEFAULT_MODEL}
+                    />
+                  </label>
+                )}
               {providerMode === 'http_api' && (
                 <label>
                   {t.apiKeyToken}
