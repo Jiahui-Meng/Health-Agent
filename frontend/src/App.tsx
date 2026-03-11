@@ -9,6 +9,7 @@ import {
   UserProfile,
   createUser,
   deleteSession,
+  exportUserReport,
   getMessages,
   getModelConfigStatus,
   getOAuthStatus,
@@ -103,6 +104,9 @@ const UI_TEXT = {
     username: '用户名',
     usernamePlaceholder: '例如 张三',
     modelApi: '模型 API',
+    openSettings: '打开模型配置',
+    exportReport: '导出报告',
+    exporting: '导出中...',
     hide: '收起',
     edit: '编辑',
     statusLabel: '状态',
@@ -144,7 +148,6 @@ const UI_TEXT = {
     mcpStatus: 'MCP 状态',
     saveAndStart: '保存并开始',
     intakeTag: '问诊中',
-    intakeHint: '请按下面问题补充信息，系统会在 3-5 轮后给出总结建议。',
     graphSummary: '健康图谱摘要',
     graphLongTerm: '长期特征',
     graphTimeline: '近期症状时间线',
@@ -188,6 +191,9 @@ const UI_TEXT = {
     username: 'Username',
     usernamePlaceholder: 'e.g. Alice',
     modelApi: 'Model API',
+    openSettings: 'Open model settings',
+    exportReport: 'Export report',
+    exporting: 'Exporting...',
     hide: 'Hide',
     edit: 'Edit',
     statusLabel: 'Status',
@@ -229,7 +235,6 @@ const UI_TEXT = {
     mcpStatus: 'MCP Status',
     saveAndStart: 'Save and Start',
     intakeTag: 'Intake',
-    intakeHint: 'Please answer the questions below. A conclusion is generated after 3-5 rounds.',
     graphSummary: 'Health Graph Summary',
     graphLongTerm: 'Longitudinal Features',
     graphTimeline: 'Recent Symptom Timeline',
@@ -431,7 +436,6 @@ export default function App() {
 
   const [modelConfigured, setModelConfigured] = useState(false)
   const [showModelConfigModal, setShowModelConfigModal] = useState(false)
-  const [showApiConfigForm, setShowApiConfigForm] = useState(false)
   const [providerMode, setProviderMode] = useState<'codex_cli' | 'http_api'>('codex_cli')
   const [modelBaseUrl, setModelBaseUrl] = useState(OPENAI_BASE_URL)
   const [modelName, setModelName] = useState(OPENAI_DEFAULT_MODEL)
@@ -445,6 +449,7 @@ export default function App() {
   const [mcpAvailable, setMcpAvailable] = useState(false)
   const [mcpStatusMessage, setMcpStatusMessage] = useState('')
   const [oauthActionLoading, setOauthActionLoading] = useState(false)
+  const [exportingReport, setExportingReport] = useState(false)
 
   const activeUser = useMemo(() => users.find((user) => user.id === activeUserId) || null, [users, activeUserId])
   const activeLocale = activeUser?.locale || 'zh-CN'
@@ -484,7 +489,6 @@ export default function App() {
         setMcpAvailable(modelStatus.mcp_available)
         setMcpStatusMessage(modelStatus.mcp_status_message || '')
         setShowModelConfigModal(!modelStatus.configured)
-        setShowApiConfigForm(!modelStatus.configured)
 
         let fetchedUsers = (await getUsers()).users
         let importedActiveUsername = ''
@@ -743,7 +747,7 @@ export default function App() {
       setModelName(status.model_name || OPENAI_DEFAULT_MODEL)
       setModelApiKey('')
       if (status.configured) {
-        setShowApiConfigForm(false)
+        setShowModelConfigModal(false)
       }
       return status.configured
     } catch (e) {
@@ -817,6 +821,29 @@ export default function App() {
     }
   }
 
+  async function onExportReport() {
+    if (!activeUser) return
+    setError('')
+    setExportingReport(true)
+    try {
+      const blob = await exportUserReport(activeUser.id)
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      const safeName = activeUser.username.trim().replace(/\s+/g, '_') || 'user'
+      const date = new Date().toISOString().slice(0, 10).replace(/-/g, '')
+      link.href = url
+      link.download = `health-agent-${safeName}-${date}.md`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setExportingReport(false)
+    }
+  }
+
   const riskColor: Record<string, string> = {
     low: 'var(--risk-low)',
     medium: 'var(--risk-medium)',
@@ -824,8 +851,6 @@ export default function App() {
     emergency: 'var(--risk-emergency)',
   }
 
-  const graphPersistent = userGraph?.summary_bundle.persistent_features || {}
-  const graphHighlights = userGraph?.summary_bundle.profile_highlights || []
   const graphJourney = normalizeJourney(userGraph)
   const graphRiskSignals = normalizeRiskSignals(userGraph)
   const graphActiveSignals = graphRiskSignals.filter((item) => item.is_active || item.is_current_session).slice(0, 2)
@@ -836,6 +861,15 @@ export default function App() {
   return (
     <div className="page">
       <div className="aurora" />
+      <button
+        type="button"
+        className="floating-settings"
+        onClick={() => setShowModelConfigModal(true)}
+        aria-label={t.openSettings}
+        title={t.openSettings}
+      >
+        {'\u2699'}
+      </button>
       <header className="hero">
         <h1>Health Agent</h1>
         <p>{t.heroSubtitle}</p>
@@ -865,6 +899,9 @@ export default function App() {
                 <button type="button" onClick={openEditUserModal}>
                   {t.editUser}
                 </button>
+                <button type="button" onClick={() => void onExportReport()} disabled={exportingReport}>
+                  {exportingReport ? t.exporting : t.exportReport}
+                </button>
               </div>
 
               <div className="profile-summary">
@@ -883,73 +920,6 @@ export default function App() {
                   <p>
                     {t.sex}: {activeUser.sex}
                   </p>
-                )}
-                {activeUser.conditions.length > 0 && (
-                  <p>
-                    {t.conditions}: {toCsv(activeUser.conditions)}
-                  </p>
-                )}
-                {activeUser.medications.length > 0 && (
-                  <p>
-                    {t.medications}: {toCsv(activeUser.medications)}
-                  </p>
-                )}
-                {activeUser.allergies.length > 0 && (
-                  <p>
-                    {t.allergies}: {toCsv(activeUser.allergies)}
-                  </p>
-                )}
-              </div>
-
-              <div className="profile-summary">
-                <h3>{t.graphLongTerm}</h3>
-                {graphHighlights.length > 0 && (
-                  <div className="chip-row">
-                    {graphHighlights.map((item) => (
-                      <span key={item} className="summary-chip summary-chip-muted">
-                        {item}
-                      </span>
-                    ))}
-                  </div>
-                )}
-                {graphPersistent.conditions?.length ? (
-                  <div className="summary-group">
-                    <span className="summary-label">{t.conditions}</span>
-                    <div className="chip-row">
-                      {graphPersistent.conditions.map((item) => (
-                        <span key={`condition-${item}`} className="summary-chip">
-                          {item}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-                {graphPersistent.medications?.length ? (
-                  <div className="summary-group">
-                    <span className="summary-label">{t.medications}</span>
-                    <div className="chip-row">
-                      {graphPersistent.medications.map((item) => (
-                        <span key={`medication-${item}`} className="summary-chip">
-                          {item}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-                {graphPersistent.allergies?.length ? (
-                  <div className="summary-group">
-                    <span className="summary-label">{t.allergies}</span>
-                    <div className="chip-row">
-                      {graphPersistent.allergies.map((item) => (
-                        <span key={`allergy-${item}`} className="summary-chip summary-chip-warn">
-                          {item}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-                {!graphPersistent.conditions?.length && !graphPersistent.medications?.length && !graphPersistent.allergies?.length && (
-                  <p className="placeholder">{t.graphNoLongTerm}</p>
                 )}
               </div>
 
@@ -1017,116 +987,6 @@ export default function App() {
             <p className="placeholder">{t.noUserHint}</p>
           )}
 
-          <section className="api-config-card">
-            <div className="api-config-head">
-              <h3>{t.modelApi}</h3>
-              <button
-                type="button"
-                className="api-toggle"
-                onClick={() => setShowApiConfigForm((current) => !current)}
-              >
-                {showApiConfigForm ? t.hide : t.edit}
-              </button>
-            </div>
-            <p className="api-status">
-              {t.statusLabel}: {modelConfigured ? t.statusConfigured : t.statusNotConfigured}
-            </p>
-
-            {showApiConfigForm && (
-              <form className="grid api-form" onSubmit={onSaveModelConfig}>
-                <label>
-                  {t.providerMode}
-                  <select
-                    value={providerMode}
-                    onChange={(e) => {
-                      const next = e.target.value as 'codex_cli' | 'http_api'
-                      setProviderMode(next)
-                      if (next === 'codex_cli') {
-                        setModelBaseUrl(OPENAI_BASE_URL)
-                        setModelName(OPENAI_DEFAULT_MODEL)
-                      } else {
-                        setModelBaseUrl(BIGMODEL_BASE_URL)
-                        setModelName(BIGMODEL_DEFAULT_MODEL)
-                      }
-                    }}
-                  >
-                    <option value="codex_cli">{t.providerOAuth}</option>
-                    <option value="http_api">{t.providerHttp}</option>
-                  </select>
-                </label>
-                {providerMode === 'http_api' && (
-                  <label>
-                    {t.baseUrl}
-                    <input
-                      value={modelBaseUrl}
-                      onChange={(e) => setModelBaseUrl(e.target.value)}
-                      placeholder={BIGMODEL_BASE_URL}
-                    />
-                  </label>
-                )}
-                {providerMode === 'codex_cli' ? (
-                  <label>
-                    {t.codexModel}
-                    <select value={modelName} onChange={(e) => setModelName(e.target.value)}>
-                      {CODEX_MODEL_OPTIONS.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : (
-                  <label>
-                    {t.modelName}
-                    <input
-                      value={modelName}
-                      onChange={(e) => setModelName(e.target.value)}
-                      placeholder={BIGMODEL_DEFAULT_MODEL}
-                    />
-                  </label>
-                )}
-                {providerMode === 'http_api' && (
-                  <label>
-                    {t.apiKeyToken}
-                    <input
-                      type="password"
-                      value={modelApiKey}
-                      onChange={(e) => setModelApiKey(e.target.value)}
-                      placeholder={t.apiKeyPlaceholder}
-                    />
-                  </label>
-                )}
-                {providerMode === 'codex_cli' && (
-                  <div className="profile-summary">
-                    <p>
-                      {t.oauthStatus}: {oauthStatusMessage || '-'}
-                    </p>
-                    <p>CLI: {oauthCliAvailable ? 'available' : 'unavailable'}</p>
-                    <p>
-                      {t.mcpStatus}: {mcpAvailable ? 'available' : 'unavailable'}
-                      {mcpStatusMessage ? ` (${mcpStatusMessage})` : ''}
-                    </p>
-                    {oauthAccountId && <p>Account: {oauthAccountId}</p>}
-                    <div className="user-actions">
-                      <button type="button" onClick={onOAuthLogin} disabled={oauthActionLoading}>
-                        {t.oauthLogin}
-                      </button>
-                      <button type="button" onClick={onOAuthLogout} disabled={oauthActionLoading}>
-                        {t.oauthLogout}
-                      </button>
-                    </div>
-                    <button type="button" onClick={refreshOAuthStatus} disabled={oauthActionLoading}>
-                      {t.oauthRefresh}
-                    </button>
-                  </div>
-                )}
-                <button type="submit" disabled={modelConfigSaving}>
-                  {modelConfigSaving ? t.saving : t.saveApiConfig}
-                </button>
-              </form>
-            )}
-            {modelConfigError && <p className="error">{modelConfigError}</p>}
-          </section>
         </aside>
 
         <section className="panel chat-panel">
@@ -1149,31 +1009,29 @@ export default function App() {
                   {msg.role === 'assistant' && parsed && (
                     <div className="assistant-card">
                       {parsed.stage === 'intake' ? (
-                        <>
-                          <div className="risk-tag intake-tag">{t.intakeTag}</div>
-                          <h3>{parsed.summary}</h3>
-                          <p className="intake-hint">{t.intakeHint}</p>
-                          <ul>
-                            {(parsed.follow_up_questions || []).map((question, i) => (
-                              <li key={`${msg.id}-q-${i}`}>{question}</li>
-                            ))}
-                          </ul>
-                        </>
+                        <div className="doctor-dialogue">
+                          <p>{parsed.summary}</p>
+                          {(parsed.follow_up_questions || []).map((question, i) => (
+                            <p key={`${msg.id}-q-${i}`} className="doctor-question">
+                              {question}
+                            </p>
+                          ))}
+                        </div>
                       ) : (
                         <>
-                          <div className="risk-tag" style={{ background: riskColor[parsed.risk_level] || '#495057' }}>
-                            {t.risk[parsed.risk_level]}
-                          </div>
-                          <h3>{parsed.summary}</h3>
                           <ul>
                             {parsed.next_steps.map((step, i) => (
                               <li key={`${msg.id}-${i}`}>{step}</li>
                             ))}
                           </ul>
                           {parsed.emergency_guidance && <p className="emergency">{parsed.emergency_guidance}</p>}
+                          <h3>{parsed.summary}</h3>
+                          <div className="risk-tag" style={{ background: riskColor[parsed.risk_level] || '#495057' }}>
+                            {t.risk[parsed.risk_level]}
+                          </div>
+                          <p className="disclaimer">{parsed.disclaimer}</p>
                         </>
                       )}
-                      <p className="disclaimer">{parsed.disclaimer}</p>
                     </div>
                   )}
                   {msg.role === 'assistant' && !parsed && <p>{msg.content}</p>}
@@ -1186,6 +1044,15 @@ export default function App() {
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault()
+                  const form = e.currentTarget.form
+                  if (form) {
+                    form.requestSubmit()
+                  }
+                }
+              }}
               placeholder={t.composerPlaceholder}
               rows={4}
               disabled={!modelConfigured || checkingModelConfig || !activeUser}
@@ -1314,6 +1181,11 @@ export default function App() {
           <section className="modal">
             <h2>{t.modalTitle}</h2>
             <p>{t.modalDesc}</p>
+            {modelConfigured && (
+              <button type="button" onClick={() => setShowModelConfigModal(false)}>
+                {t.hide}
+              </button>
+            )}
             <form onSubmit={onSaveModelConfig} className="grid">
               <label>
                 {t.providerMode}
@@ -1396,6 +1268,9 @@ export default function App() {
                       {t.oauthLogout}
                     </button>
                   </div>
+                  <button type="button" onClick={refreshOAuthStatus} disabled={oauthActionLoading}>
+                    {t.oauthRefresh}
+                  </button>
                 </div>
               )}
               <button type="submit" disabled={modelConfigSaving}>

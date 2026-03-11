@@ -142,5 +142,37 @@ def enforce_no_diagnosis_or_prescription(answer: dict, locale: str) -> dict:
     return answer
 
 
+def enforce_intake_questioning(answer: dict, locale: str) -> dict:
+    if answer.get("stage") != "intake":
+        return answer
+
+    summary = str(answer.get("summary") or "")
+    follow_ups = [str(item).strip() for item in (answer.get("follow_up_questions") or []) if str(item).strip()]
+    unsafe_summary = any(p.search(summary) for p in DIAGNOSIS_PATTERNS + PRESCRIPTION_PATTERNS)
+    unsafe_summary = unsafe_summary or any(
+        token in summary.lower()
+        for token in ["low risk", "medium risk", "high risk", "emergency", "初步判断", "中风险", "高风险", "低风险"]
+    )
+
+    if not unsafe_summary and follow_ups:
+        answer["next_steps"] = []
+        return answer
+
+    if locale.startswith("zh"):
+        answer["summary"] = "我先把情况问清楚一点，这样后面的判断会更稳妥。"
+        answer["follow_up_questions"] = follow_ups[:2] or [
+            "这些症状是突然出现的，还是慢慢加重的？",
+            "现在最明显的不舒服是什么，严重程度大概几分？",
+        ]
+    else:
+        answer["summary"] = "I want to clarify a few details first so the next step is safer and more accurate."
+        answer["follow_up_questions"] = follow_ups[:2] or [
+            "Did these symptoms come on suddenly, or have they been getting worse gradually?",
+            "What is the main symptom right now, and how severe is it?",
+        ]
+    answer["next_steps"] = []
+    return answer
+
+
 def max_risk(r1: str, r2: str) -> str:
     return r1 if RISK_SCORE.get(r1, 0) >= RISK_SCORE.get(r2, 0) else r2

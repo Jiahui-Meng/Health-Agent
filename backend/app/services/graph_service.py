@@ -99,25 +99,6 @@ def mark_user_active(db: Session, user: UserRecord) -> UserRecord:
 
 def get_graph_bundle(db: Session, user_id: str, current_session_id: str | None = None) -> GraphContextBundle:
     user = db.get(UserRecord, user_id)
-    nodes = (
-        db.execute(
-            select(UserGraphNodeRecord)
-            .where(UserGraphNodeRecord.user_id == user_id)
-            .order_by(UserGraphNodeRecord.updated_at.desc(), UserGraphNodeRecord.created_at.desc())
-        )
-        .scalars()
-        .all()
-    )
-    persistent_features = {
-        "conditions": [node.label for node in nodes if node.node_type == "condition"],
-        "medications": [node.label for node in nodes if node.node_type == "medication"],
-        "allergies": [node.label for node in nodes if node.node_type == "allergy"],
-    }
-    timeline_nodes = [node for node in nodes if node.node_type in {"symptom_event", "timeline_marker"}]
-    recent_timeline = [
-        {"node_type": node.node_type, "label": node.label, "payload": node.payload or {}}
-        for node in timeline_nodes[:10]
-    ]
     session_ids_by_recency = [
         session.id
         for session in (
@@ -129,6 +110,26 @@ def get_graph_bundle(db: Session, user_id: str, current_session_id: str | None =
             .scalars()
             .all()
         )
+    ]
+    nodes = (
+        db.execute(
+            select(UserGraphNodeRecord)
+            .where(UserGraphNodeRecord.user_id == user_id)
+            .order_by(UserGraphNodeRecord.updated_at.desc(), UserGraphNodeRecord.created_at.desc())
+        )
+        .scalars()
+        .all()
+    )
+    nodes = _filter_nodes_for_existing_sessions(nodes, set(session_ids_by_recency))
+    persistent_features = {
+        "conditions": [node.label for node in nodes if node.node_type == "condition"],
+        "medications": [node.label for node in nodes if node.node_type == "medication"],
+        "allergies": [node.label for node in nodes if node.node_type == "allergy"],
+    }
+    timeline_nodes = [node for node in nodes if node.node_type in {"symptom_event", "timeline_marker"}]
+    recent_timeline = [
+        {"node_type": node.node_type, "label": node.label, "payload": node.payload or {}}
+        for node in timeline_nodes[:10]
     ]
     effective_session_id = current_session_id or (session_ids_by_recency[0] if session_ids_by_recency else None)
     recent_journey = _build_recent_journey(nodes, effective_session_id, session_ids_by_recency)
@@ -151,6 +152,14 @@ def get_graph_bundle(db: Session, user_id: str, current_session_id: str | None =
 
 
 def get_graph_payload(db: Session, user_id: str) -> dict[str, Any]:
+    session_ids = {
+        session.id
+        for session in (
+            db.execute(select(SessionRecord).where(SessionRecord.user_id == user_id))
+            .scalars()
+            .all()
+        )
+    }
     nodes = (
         db.execute(
             select(UserGraphNodeRecord)
@@ -160,6 +169,8 @@ def get_graph_payload(db: Session, user_id: str) -> dict[str, Any]:
         .scalars()
         .all()
     )
+    nodes = _filter_nodes_for_existing_sessions(nodes, session_ids)
+    valid_node_ids = {node.id for node in nodes}
     edges = (
         db.execute(
             select(UserGraphEdgeRecord)
@@ -169,6 +180,7 @@ def get_graph_payload(db: Session, user_id: str) -> dict[str, Any]:
         .scalars()
         .all()
     )
+    edges = [edge for edge in edges if edge.from_node_id in valid_node_ids and edge.to_node_id in valid_node_ids]
     bundle = get_graph_bundle(db, user_id)
     return {
         "nodes": [
@@ -246,19 +258,20 @@ def upsert_session_graph(
         )
         _ensure_edge(db, user.id, session_node.id, marker_node.id, "OCCURRED_AT")
 
-    risk_labels = list(dict.fromkeys(risk_triggers))
-    if answer.get("risk_level") in {"high", "emergency"} and answer.get("risk_level") not in risk_labels:
-        risk_labels.append(str(answer["risk_level"]))
-    for label in risk_labels:
-        risk_node = _get_or_create_node(
-            db,
-            user.id,
-            "risk_signal",
-            label,
-            {"session_id": session_record.id, "risk_level": answer.get("risk_level")},
-            source="chat",
-        )
-        _ensure_edge(db, user.id, session_node.id, risk_node.id, "HAS_RISK_SIGNAL")
+    if answer.get("stage") == "conclusion":
+        risk_labels = list(dict.fromkeys(risk_triggers))
+        if answer.get("risk_level") in {"high", "emergency"} and answer.get("risk_level") not in risk_labels:
+            risk_labels.append(str(answer["risk_level"]))
+        for label in risk_labels:
+            risk_node = _get_or_create_node(
+                db,
+                user.id,
+                "risk_signal",
+                label,
+                {"session_id": session_record.id, "risk_level": answer.get("risk_level")},
+                source="chat",
+            )
+            _ensure_edge(db, user.id, session_node.id, risk_node.id, "HAS_RISK_SIGNAL")
 
     summary = str(answer.get("summary") or "").strip()
     if summary:
@@ -271,6 +284,35 @@ def upsert_session_graph(
             source="summary",
         )
         _ensure_edge(db, user.id, session_node.id, summary_node.id, "SUMMARIZED_AS")
+
+
+def delete_session_graph_subtree(db: Session, user_id: str, session_id: str) -> None:
+    nodes = (
+        db.execute(
+            select(UserGraphNodeRecord).where(UserGraphNodeRecord.user_id == user_id)
+        )
+        .scalars()
+        .all()
+    )
+    removable_ids = {
+        node.id
+        for node in nodes
+        if (
+            node.node_type == "session"
+            and node.label == session_id
+        )
+        or str((node.payload or {}).get("session_id") or "") == session_id
+    }
+    if removable_ids:
+        db.execute(
+            delete(UserGraphEdgeRecord).where(
+                UserGraphEdgeRecord.user_id == user_id,
+                (UserGraphEdgeRecord.from_node_id.in_(removable_ids)) | (UserGraphEdgeRecord.to_node_id.in_(removable_ids)),
+            )
+        )
+        db.execute(delete(UserGraphNodeRecord).where(UserGraphNodeRecord.id.in_(removable_ids)))
+        db.flush()
+    _prune_orphan_symptom_nodes(db, user_id)
 
 
 def _ensure_user_root_node(db: Session, user: UserRecord) -> UserGraphNodeRecord:
@@ -461,6 +503,48 @@ def _build_profile_highlights(user: UserRecord | None) -> list[str]:
         return []
     parts = [item for item in [user.birth_year, user.sex, user.region_code] if item]
     return parts[:3]
+
+
+def _filter_nodes_for_existing_sessions(
+    nodes: list[UserGraphNodeRecord],
+    valid_session_ids: set[str],
+) -> list[UserGraphNodeRecord]:
+    filtered = []
+    for node in nodes:
+        payload_session_id = str((node.payload or {}).get("session_id") or "")
+        if node.node_type == "session" and node.label not in valid_session_ids:
+            continue
+        if payload_session_id and payload_session_id not in valid_session_ids:
+            continue
+        filtered.append(node)
+    return filtered
+
+
+def _prune_orphan_symptom_nodes(db: Session, user_id: str) -> None:
+    symptom_nodes = (
+        db.execute(
+            select(UserGraphNodeRecord).where(
+                UserGraphNodeRecord.user_id == user_id,
+                UserGraphNodeRecord.node_type == "symptom",
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for node in symptom_nodes:
+        has_edges = (
+            db.execute(
+                select(UserGraphEdgeRecord).where(
+                    UserGraphEdgeRecord.user_id == user_id,
+                    (UserGraphEdgeRecord.from_node_id == node.id) | (UserGraphEdgeRecord.to_node_id == node.id),
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if not has_edges:
+            db.delete(node)
+    db.flush()
 
 
 def _build_recent_journey(

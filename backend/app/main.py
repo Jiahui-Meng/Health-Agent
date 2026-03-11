@@ -6,6 +6,7 @@ import sys
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 from sqlalchemy import desc, func, inspect, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -42,6 +43,7 @@ from .services.model_adapter import ModelAdapter, ModelAPIError, ModelResult, no
 from .services.codex_cli import CodexCliError, CodexCliService
 from .services.graph_service import (
     create_or_update_user,
+    delete_session_graph_subtree,
     get_graph_bundle,
     get_graph_payload,
     mark_user_active,
@@ -49,9 +51,11 @@ from .services.graph_service import (
 )
 from .services.output_parser import parse_model_json
 from .services.prompt_builder import build_codex_mcp_prompt, build_system_prompt, build_user_prompt
+from .services.export_report import build_export_context, build_export_report_messages, compose_full_markdown_report
 from .services.safety import (
     build_emergency_guidance,
     classify_risk,
+    enforce_intake_questioning,
     enforce_no_diagnosis_or_prescription,
     max_risk,
 )
@@ -258,6 +262,68 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             .all()
         )
         return SessionListResponse(sessions=[_serialize_session_item(session) for session in sessions])
+
+    @app.get(f"{app_settings.api_prefix}/users/{{user_id}}/export")
+    def export_user_markdown(user_id: str, format: str = "markdown", db: Session = Depends(db_dependency)) -> PlainTextResponse:
+        user = db.get(UserRecord, user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        if format != "markdown":
+            raise HTTPException(status_code=400, detail="Only markdown export is supported")
+
+        sessions = (
+            db.execute(
+                select(SessionRecord)
+                .where(SessionRecord.user_id == user_id)
+                .order_by(SessionRecord.created_at.asc(), SessionRecord.updated_at.asc())
+            )
+            .scalars()
+            .all()
+        )
+        session_ids = [session.id for session in sessions]
+        messages = (
+            db.execute(
+                select(MessageRecord)
+                .where(MessageRecord.session_id.in_(session_ids))
+                .order_by(MessageRecord.created_at.asc(), MessageRecord.id.asc())
+            )
+            .scalars()
+            .all()
+            if session_ids
+            else []
+        )
+        graph_payload = get_graph_payload(db, user_id)
+        export_context = build_export_context(
+            user=user,
+            sessions=sessions,
+            messages=messages,
+            graph_summary=graph_payload["summary_bundle"],
+        )
+        runtime_config = _ensure_runtime_config_row(db, app_settings)
+        report_messages = build_export_report_messages(user.locale, export_context)
+        try:
+            model_result = _generate_report_result(
+                runtime_config=runtime_config,
+                codex_cli_service=app.state.codex_cli_service,
+                model_adapter=app.state.model_adapter,
+                messages=report_messages,
+                locale=user.locale,
+            )
+        except (ModelAPIError, CodexCliError) as exc:
+            raise HTTPException(
+                status_code=getattr(exc, "status_code", 502),
+                detail={
+                    "message": str(exc),
+                    "hint": "Please verify current model configuration before exporting the report.",
+                },
+            ) from exc
+        report = compose_full_markdown_report(export_context, model_result.content)
+        filename = f"health-agent-{user.username}-{datetime.utcnow().strftime('%Y%m%d')}.md"
+        return PlainTextResponse(
+            report,
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     @app.get(f"{app_settings.api_prefix}/model-config/status", response_model=ModelConfigStatusResponse)
     def get_model_config_status(db: Session = Depends(db_dependency)) -> ModelConfigStatusResponse:
@@ -473,7 +539,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 answer["emergency_guidance"] = build_emergency_guidance(
                     payload.locale, payload.region_code, initial_risk.triggers
                 )
-            if answer["stage"] == "conclusion":
+            if answer["stage"] == "intake":
+                answer = enforce_intake_questioning(answer, payload.locale)
+            else:
                 answer = enforce_no_diagnosis_or_prescription(answer, payload.locale)
             model_name = model_result.model
             used_context_turns = context.used_turns
@@ -584,6 +652,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not session_record:
             raise HTTPException(status_code=404, detail="Session not found")
 
+        if session_record.user_id:
+            delete_session_graph_subtree(db, session_record.user_id, session_record.id)
         db.delete(session_record)
         db.commit()
         return {"deleted": True, "session_id": session_id}
@@ -774,6 +844,43 @@ def _generate_model_result(
         model_name=runtime_config.model_name or None,
     )
 
+    return ModelResult(content=content, model=runtime_config.model_name or "codex-cli")
+
+
+def _generate_report_result(
+    runtime_config: RuntimeConfig,
+    codex_cli_service: CodexCliService,
+    model_adapter: ModelAdapter,
+    messages: list[dict[str, str]],
+    locale: str,
+):
+    provider = _normalize_provider_mode(runtime_config.provider_mode)
+
+    if provider == "http_api":
+        if not runtime_config.model_api_key.strip():
+            raise ModelAPIError(
+                "HTTP API mode requires API Key (Token). Please save model config first.",
+                status_code=400,
+            )
+        _sync_adapter_with_token(model_adapter, runtime_config, runtime_config.model_api_key)
+        return model_adapter.generate_text(messages=messages, locale=locale)
+
+    status = codex_cli_service.status()
+    if not status.cli_available:
+        raise CodexCliError(status.message, status_code=400)
+    if not status.logged_in:
+        raise CodexCliError("Codex CLI is not logged in. Please run login first.", status_code=401)
+
+    prompt_blocks: list[str] = []
+    for msg in messages:
+        role = msg.get("role", "user").upper()
+        content = msg.get("content", "")
+        prompt_blocks.append(f"{role}:\n{content}")
+    prompt_text = "\n\n".join(prompt_blocks).strip()
+    content = codex_cli_service.exec_text(
+        prompt=prompt_text,
+        model_name=runtime_config.model_name or None,
+    )
     return ModelResult(content=content, model=runtime_config.model_name or "codex-cli")
 
 

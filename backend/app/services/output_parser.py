@@ -47,13 +47,13 @@ def parse_model_json(raw: str, locale: str) -> dict:
     if stage == "intake" and not follow_up_questions:
         if locale.startswith("zh"):
             follow_up_questions = [
-                "这些症状是从什么时候开始的？",
-                "目前最不舒服的症状是什么，严重程度大约几分（0-10）？",
+                "这些不舒服大概是从什么时候开始的？",
+                "现在最让你难受的是哪一个症状，严重程度大概几分（0-10）？",
             ]
         else:
             follow_up_questions = [
-                "When did these symptoms start?",
-                "Which symptom is most severe now, and how severe is it on a 0-10 scale?",
+                "When did these symptoms first start?",
+                "Which symptom is bothering you the most right now, and how severe is it on a 0-10 scale?",
             ]
 
     risk_level = str(data.get("risk_level", "medium")).lower()
@@ -69,7 +69,15 @@ def parse_model_json(raw: str, locale: str) -> dict:
         )
     summary = str(data.get("summary") or "").strip()
     if not summary:
-        summary = "先补充关键信息以便分诊判断。" if locale.startswith("zh") else "Let's gather key details first for safe triage."
+        summary = (
+            "我先确认几个关键情况，这样判断会更准确。"
+            if locale.startswith("zh") and stage == "intake"
+            else "I want to clarify a couple of key details first so I can guide you more safely."
+            if stage == "intake"
+            else "先根据目前信息做一个简要总结。"
+            if locale.startswith("zh")
+            else "Here is a concise summary based on the information so far."
+        )
 
     return {
         "summary": summary,

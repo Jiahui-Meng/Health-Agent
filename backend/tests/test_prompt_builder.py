@@ -12,6 +12,7 @@ def test_build_system_prompt_bilingual():
     assert "no" in en_prompt.lower() and "prescription" in en_prompt.lower()
     assert "intake" in zh_prompt.lower()
     assert "conclusion" in en_prompt.lower()
+    assert "风险等级说明" in zh_prompt
 
 
 def test_build_user_prompt_contains_profile_and_context():

@@ -162,6 +162,38 @@ class CodexCliService:
             self.last_mcp_error = ""
             return content
 
+    def exec_text(self, prompt: str, model_name: str | None = None, timeout_seconds: int = 90) -> str:
+        if not shutil.which(self.cli_bin):
+            raise CodexCliError(f"Codex CLI '{self.cli_bin}' is not installed.", status_code=400)
+
+        command = [
+            self.cli_bin,
+            "exec",
+            "--json",
+            "--sandbox",
+            "read-only",
+            "-C",
+            self.workspace_root,
+            "-",
+        ]
+        if model_name and model_name.strip():
+            command[2:2] = ["--model", model_name.strip()]
+
+        result = self._run(command, timeout_seconds=timeout_seconds, input_text=prompt)
+        if not result.ok:
+            detail = _extract_codex_error(result.stdout or result.message, result.stderr)
+            lower = detail.lower()
+            if "not logged in" in lower or "login required" in lower or "unauthorized" in lower:
+                raise CodexCliError("Codex CLI is not logged in. Please run login first.", status_code=401)
+            if "not supported when using codex" in lower or "model is not supported" in lower:
+                raise CodexCliError(detail, status_code=400)
+            raise CodexCliError(f"Codex CLI execution failed: {detail}", status_code=502)
+
+        content = _extract_assistant_content_from_jsonl(result.stdout)
+        if not content:
+            raise CodexCliError("Codex CLI returned empty assistant output.", status_code=502)
+        return content
+
     def _mcp_env(self) -> dict[str, str]:
         python_path_parts = [self.backend_root]
         if os.environ.get("PYTHONPATH"):

@@ -15,3 +15,12 @@ def test_parse_model_json_intake_fallback_questions():
     assert parsed["stage"] == "intake"
     assert len(parsed["follow_up_questions"]) >= 1
     assert parsed["next_steps"] == []
+
+
+def test_parse_model_json_intake_fallback_summary_is_doctor_like():
+    parsed = parse_model_json(
+        '{"summary":"","risk_level":"medium","next_steps":[],"disclaimer":"","stage":"intake","follow_up_questions":[]}',
+        "zh-CN",
+    )
+    assert parsed["stage"] == "intake"
+    assert "我先确认" in parsed["summary"] or "问清楚" in parsed["summary"]

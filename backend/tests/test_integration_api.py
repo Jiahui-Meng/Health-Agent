@@ -46,6 +46,23 @@ def _mock_model_success(client):
 
     client.app.state.model_adapter.generate = fake_generate
 
+    def fake_generate_text(messages, locale):
+        del messages, locale
+        return ModelResult(
+            content=(
+                "# 用户健康报告\n\n"
+                "## 用户概况\n"
+                "- 当前已有多次问诊记录。\n\n"
+                "## 近期症状演化\n"
+                "- 近期以发烧和咳嗽为主。\n\n"
+                "## 当前总体建议\n"
+                "- 建议继续观察并按需线下就医。"
+            ),
+            model=HTTP_MODEL_NAME,
+        )
+
+    client.app.state.model_adapter.generate_text = fake_generate_text
+
 
 def _create_user(client, username="alice"):
     response = client.post(
@@ -173,6 +190,48 @@ def test_chat_with_user_id_writes_sessions_and_graph(client):
     assert isinstance(graph_data["summary_bundle"]["risk_signals"], list)
 
 
+def test_intake_chat_does_not_write_risk_signal_to_graph(client):
+    _configure_model(client)
+    user = _create_user(client, "intake-user")
+
+    def intake_generate(messages, locale):
+        del messages, locale
+        return ModelResult(
+            content=json.dumps(
+                {
+                    "summary": "我想先确认几个细节。",
+                    "risk_level": "medium",
+                    "next_steps": [],
+                    "emergency_guidance": None,
+                    "disclaimer": "本回答仅用于健康信息参考，不能替代医生诊疗。",
+                    "stage": "intake",
+                    "follow_up_questions": ["症状是突然出现还是逐渐加重的？"],
+                },
+                ensure_ascii=False,
+            ),
+            model=HTTP_MODEL_NAME,
+        )
+
+    client.app.state.model_adapter.generate = intake_generate
+
+    response = client.post(
+        "/api/v1/chat",
+        json={
+            "user_id": user["id"],
+            "device_id": "device-intake-user",
+            "locale": "zh-CN",
+            "region_code": "HK",
+            "message": "我今天头痛，晚上更明显",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["answer"]["stage"] == "intake"
+
+    graph = client.get(f"/api/v1/users/{user['id']}/graph")
+    assert graph.status_code == 200
+    assert graph.json()["summary_bundle"]["risk_signals"] == []
+
+
 def test_import_legacy_users_when_backend_empty(client):
     imported = client.post(
         "/api/v1/users/import-legacy",
@@ -194,6 +253,47 @@ def test_import_legacy_users_when_backend_empty(client):
     )
     assert imported.status_code == 200
     assert imported.json()["users"][0]["username"] == "legacy-user"
+
+
+def test_export_user_markdown_report(client):
+    _configure_model(client)
+    _mock_model_success(client)
+    user = _create_user(client, "export-user")
+
+    chat = client.post(
+        "/api/v1/chat",
+        json={
+            "user_id": user["id"],
+            "device_id": "device-export-user",
+            "locale": "zh-CN",
+            "region_code": "HK",
+            "message": "我今天发烧、咳嗽",
+        },
+    )
+    assert chat.status_code == 200
+
+    exported = client.get(f"/api/v1/users/{user['id']}/export?format=markdown")
+    assert exported.status_code == 200
+    assert exported.headers["content-type"].startswith("text/markdown")
+    body = exported.text
+    assert "# 用户健康报告" in body
+    assert "## 当前总体建议" in body
+    assert "## Raw Transcript Appendix" in body
+
+
+def test_export_user_markdown_report_returns_error_when_provider_unavailable(client):
+    user = _create_user(client, "export-no-model-user")
+    client.post(
+        "/api/v1/model-config",
+        json={
+            "base_url": HTTP_BASE_URL,
+            "provider_mode": "http_api",
+            "api_key": "",
+            "model_name": HTTP_MODEL_NAME,
+        },
+    )
+    exported = client.get(f"/api/v1/users/{user['id']}/export?format=markdown")
+    assert exported.status_code == 400
 
 
 def test_model_config_setup_flow(client):
@@ -362,6 +462,36 @@ def test_delete_session(client):
 
     check = client.get(f"/api/v1/sessions/{session_id}/messages")
     assert check.status_code == 404
+
+
+def test_delete_session_removes_graph_subtree(client):
+    _configure_model(client)
+    _mock_model_success(client)
+    user = _create_user(client, "delete-graph-user")
+
+    response = client.post(
+        "/api/v1/chat",
+        json={
+            "user_id": user["id"],
+            "device_id": "device-delete-graph-user",
+            "locale": "zh-CN",
+            "region_code": "HK",
+            "message": "我今天发烧、咳嗽",
+        },
+    )
+    assert response.status_code == 200
+    session_id = response.json()["meta"]["session_id"]
+
+    graph_before = client.get(f"/api/v1/users/{user['id']}/graph")
+    assert graph_before.status_code == 200
+    assert any(node["node_type"] == "session" and node["label"] == session_id for node in graph_before.json()["nodes"])
+
+    deleted = client.delete(f"/api/v1/sessions/{session_id}")
+    assert deleted.status_code == 200
+
+    graph_after = client.get(f"/api/v1/users/{user['id']}/graph")
+    assert graph_after.status_code == 200
+    assert not any(node["node_type"] == "session" and node["label"] == session_id for node in graph_after.json()["nodes"])
 
 
 def test_triage_progresses_from_intake_to_conclusion_by_round(client):

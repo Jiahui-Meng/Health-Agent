@@ -259,6 +259,15 @@ export async function updateUser(userId: string, payload: UserUpdateRequest): Pr
   })
 }
 
+export async function exportUserReport(userId: string): Promise<Blob> {
+  const response = await fetch(`${API_BASE}/api/v1/users/${userId}/export?format=markdown`)
+  if (!response.ok) {
+    const detail = await response.text()
+    throw new Error(`API ${response.status}: ${detail}`)
+  }
+  return response.blob()
+}
+
 export async function deleteUser(userId: string): Promise<{ deleted: boolean; user_id: string }> {
   return callApi<{ deleted: boolean; user_id: string }>(`/api/v1/users/${userId}`, {
     method: 'DELETE',

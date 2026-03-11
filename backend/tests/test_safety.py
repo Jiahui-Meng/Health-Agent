@@ -1,4 +1,9 @@
-from app.services.safety import classify_risk, enforce_no_diagnosis_or_prescription, max_risk
+from app.services.safety import (
+    classify_risk,
+    enforce_intake_questioning,
+    enforce_no_diagnosis_or_prescription,
+    max_risk,
+)
 
 
 def test_classify_risk_emergency_zh():
@@ -28,3 +33,20 @@ def test_post_guard_rewrites_unsafe_answer():
 def test_max_risk():
     assert max_risk("high", "medium") == "high"
     assert max_risk("low", "emergency") == "emergency"
+
+
+def test_intake_guard_rewrites_conclusion_like_content():
+    answer = {
+        "summary": "初步判断属于中风险，建议先观察。",
+        "risk_level": "medium",
+        "next_steps": ["继续观察"],
+        "emergency_guidance": None,
+        "disclaimer": "",
+        "stage": "intake",
+        "follow_up_questions": [],
+    }
+    safe = enforce_intake_questioning(answer, "zh-CN")
+    assert safe["stage"] == "intake"
+    assert safe["next_steps"] == []
+    assert len(safe["follow_up_questions"]) >= 1
+    assert "中风险" not in safe["summary"]

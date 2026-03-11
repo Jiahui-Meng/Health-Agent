@@ -38,6 +38,42 @@ class ModelAdapter:
             return self._generate_nvidia_stream(messages)
         return self._generate_standard(messages)
 
+    def generate_text(self, messages: list[dict[str, str]], locale: str) -> ModelResult:
+        del locale
+
+        if not self.api_key:
+            raise ModelAPIError(
+                "Model API key is not configured. Please set API Key (Token) in model configuration.",
+                status_code=400,
+            )
+
+        try:
+            completion = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=0.2,
+            )
+        except APIConnectionError as exc:
+            raise ModelAPIError(
+                "Failed to reach model API. Please check Base URL and network connectivity.",
+                status_code=502,
+            ) from exc
+        except APITimeoutError as exc:
+            raise ModelAPIError(
+                "Model API request timed out. Please retry or increase timeout.",
+                status_code=504,
+            ) from exc
+        except APIStatusError as exc:
+            message = self._extract_status_error(exc)
+            raise ModelAPIError(message, status_code=502) from exc
+
+        choice = completion.choices[0] if completion.choices else None
+        msg = choice.message if choice else None
+        content = (msg.content or "").strip() if msg else ""
+        if not content:
+            raise ModelAPIError("Model API response is missing message content.", status_code=502)
+        return ModelResult(content=content, model=(completion.model or self.model_name))
+
     def is_configured(self) -> bool:
         return bool(self.api_key.strip())
 
