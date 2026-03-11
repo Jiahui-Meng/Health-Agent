@@ -11,12 +11,14 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from .config import Settings, get_settings
 from .database import Base, build_session_factory, create_engine_for_url, get_db_session
-from .models import MessageRecord, RuntimeConfig, SessionRecord
+from .models import MessageRecord, RuntimeConfig, SessionRecord, UserRecord
 from .schemas import (
     ChatAnswer,
     ChatMeta,
     ChatRequest,
     ChatResponse,
+    GraphContextBundle,
+    LegacyImportRequest,
     MessageItem,
     MessageListResponse,
     ModelConfigRequest,
@@ -26,10 +28,25 @@ from .schemas import (
     OAuthStatusResponse,
     SessionItem,
     SessionListResponse,
+    UserCreateRequest,
+    UserDeleteResponse,
+    UserGraphEdge,
+    UserGraphNode,
+    UserGraphResponse,
+    UserListResponse,
+    UserProfile,
+    UserUpdateRequest,
 )
 from .services.context_builder import build_context
 from .services.model_adapter import ModelAdapter, ModelAPIError, ModelResult, normalize_model_base_url
 from .services.codex_cli import CodexCliError, CodexCliService
+from .services.graph_service import (
+    create_or_update_user,
+    get_graph_bundle,
+    get_graph_payload,
+    mark_user_active,
+    upsert_session_graph,
+)
 from .services.output_parser import parse_model_json
 from .services.prompt_builder import build_codex_mcp_prompt, build_system_prompt, build_user_prompt
 from .services.safety import (
@@ -100,6 +117,147 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health")
     def healthcheck() -> dict:
         return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+
+    @app.get(f"{app_settings.api_prefix}/users", response_model=UserListResponse)
+    def list_users(db: Session = Depends(db_dependency)) -> UserListResponse:
+        users = (
+            db.execute(select(UserRecord).order_by(UserRecord.last_active_at.desc(), UserRecord.created_at.asc()))
+            .scalars()
+            .all()
+        )
+        return UserListResponse(users=[_serialize_user_profile(db, user) for user in users])
+
+    @app.post(f"{app_settings.api_prefix}/users", response_model=UserProfile)
+    def create_user(payload: UserCreateRequest, db: Session = Depends(db_dependency)) -> UserProfile:
+        existing = (
+            db.execute(select(UserRecord).where(func.lower(UserRecord.username) == payload.username.strip().lower()))
+            .scalars()
+            .first()
+        )
+        if existing:
+            raise HTTPException(status_code=409, detail="Username already exists")
+
+        user = create_or_update_user(
+            db,
+            username=payload.username.strip(),
+            locale=payload.locale,
+            region_code=payload.region_code,
+            birth_year=payload.birth_year.strip(),
+            sex=payload.sex.strip(),
+            conditions=payload.conditions,
+            medications=payload.medications,
+            allergies=payload.allergies,
+        )
+        db.commit()
+        db.refresh(user)
+        return _serialize_user_profile(db, user)
+
+    @app.patch(f"{app_settings.api_prefix}/users/{{user_id}}", response_model=UserProfile)
+    def update_user(user_id: str, payload: UserUpdateRequest, db: Session = Depends(db_dependency)) -> UserProfile:
+        user = db.get(UserRecord, user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        if payload.locale is not None:
+            user.locale = payload.locale
+        if payload.region_code is not None:
+            user.region_code = payload.region_code
+        if payload.birth_year is not None:
+            user.birth_year = payload.birth_year.strip()
+        if payload.sex is not None:
+            user.sex = payload.sex.strip()
+        if payload.mark_active:
+            mark_user_active(db, user)
+
+        user = create_or_update_user(
+            db,
+            username=user.username,
+            locale=user.locale,
+            region_code=user.region_code,
+            birth_year=user.birth_year,
+            sex=user.sex,
+            conditions=payload.conditions if payload.conditions is not None else _persistent_values(db, user.id, "condition"),
+            medications=payload.medications if payload.medications is not None else _persistent_values(db, user.id, "medication"),
+            allergies=payload.allergies if payload.allergies is not None else _persistent_values(db, user.id, "allergy"),
+            user=user,
+            mark_active=payload.mark_active,
+        )
+        db.commit()
+        db.refresh(user)
+        return _serialize_user_profile(db, user)
+
+    @app.delete(f"{app_settings.api_prefix}/users/{{user_id}}", response_model=UserDeleteResponse)
+    def delete_user(user_id: str, db: Session = Depends(db_dependency)) -> UserDeleteResponse:
+        user = db.get(UserRecord, user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        sessions = db.execute(select(SessionRecord).where(SessionRecord.user_id == user_id)).scalars().all()
+        for session in sessions:
+            db.delete(session)
+        db.delete(user)
+        db.commit()
+        return UserDeleteResponse(deleted=True, user_id=user_id)
+
+    @app.post(f"{app_settings.api_prefix}/users/import-legacy", response_model=UserListResponse)
+    def import_legacy_users(payload: LegacyImportRequest, db: Session = Depends(db_dependency)) -> UserListResponse:
+        existing_count = db.execute(select(func.count(UserRecord.id))).scalar_one()
+        if existing_count > 0:
+            users = (
+                db.execute(select(UserRecord).order_by(UserRecord.last_active_at.desc(), UserRecord.created_at.asc()))
+                .scalars()
+                .all()
+            )
+            return UserListResponse(users=[_serialize_user_profile(db, user) for user in users])
+
+        imported_users: list[UserRecord] = []
+        for profile in payload.profiles:
+            if not profile.username.strip():
+                continue
+            user = create_or_update_user(
+                db,
+                username=profile.username.strip(),
+                locale=profile.locale,
+                region_code=profile.region_code,
+                birth_year=profile.birth_year.strip(),
+                sex=profile.sex.strip(),
+                conditions=profile.conditions,
+                medications=profile.medications,
+                allergies=profile.allergies,
+                mark_active=payload.active_username == profile.username,
+            )
+            imported_users.append(user)
+
+        db.commit()
+        return UserListResponse(users=[_serialize_user_profile(db, user) for user in imported_users])
+
+    @app.get(f"{app_settings.api_prefix}/users/{{user_id}}/graph", response_model=UserGraphResponse)
+    def get_user_graph(user_id: str, db: Session = Depends(db_dependency)) -> UserGraphResponse:
+        user = db.get(UserRecord, user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        payload = get_graph_payload(db, user_id)
+        return UserGraphResponse(
+            user_id=user_id,
+            nodes=[UserGraphNode(**node) for node in payload["nodes"]],
+            edges=[UserGraphEdge(**edge) for edge in payload["edges"]],
+            summary_bundle=GraphContextBundle(**payload["summary_bundle"]),
+        )
+
+    @app.get(f"{app_settings.api_prefix}/users/{{user_id}}/sessions", response_model=SessionListResponse)
+    def get_user_sessions(user_id: str, db: Session = Depends(db_dependency)) -> SessionListResponse:
+        user = db.get(UserRecord, user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        sessions = (
+            db.execute(
+                select(SessionRecord)
+                .where(SessionRecord.user_id == user_id)
+                .order_by(SessionRecord.updated_at.desc(), SessionRecord.created_at.desc())
+            )
+            .scalars()
+            .all()
+        )
+        return SessionListResponse(sessions=[_serialize_session_item(session) for session in sessions])
 
     @app.get(f"{app_settings.api_prefix}/model-config/status", response_model=ModelConfigStatusResponse)
     def get_model_config_status(db: Session = Depends(db_dependency)) -> ModelConfigStatusResponse:
@@ -180,7 +338,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post(f"{app_settings.api_prefix}/chat", response_model=ChatResponse)
     def chat(payload: ChatRequest, db: Session = Depends(db_dependency)) -> ChatResponse:
         runtime_config = _ensure_runtime_config_row(db, app_settings)
-        session_record = _get_or_create_session(db, payload)
+        user_record = _resolve_user_record(db, payload)
+        if user_record:
+            mark_user_active(db, user_record)
+            payload.locale = user_record.locale or payload.locale
+            payload.region_code = user_record.region_code or payload.region_code
+        session_record = _get_or_create_session(db, payload, user_record)
         profile_changed = _merge_profile(session_record, payload.health_profile.model_dump() if payload.health_profile else None)
 
         initial_risk = classify_risk(payload.message)
@@ -246,6 +409,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 turn_limit=app_settings.context_turn_limit,
                 max_chars=app_settings.max_context_chars,
             )
+            graph_bundle = get_graph_bundle(db, user_record.id, session_record.id) if user_record else None
             next_round = (session_record.triage_round_count or 0) + 1
             current_stage = session_record.triage_stage or "intake"
             forced_stage = _choose_forced_stage(current_stage, next_round)
@@ -275,6 +439,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     profile=payload.health_profile,
                     long_summary=context.summary,
                     recent_messages=context.recent_messages,
+                    graph_context=graph_bundle.__dict__ if graph_bundle else {},
                     triage_stage=target_stage,
                     triage_round_count=next_round,
                     max_rounds=MAX_TRIAGE_ROUNDS,
@@ -325,6 +490,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         session_record.locale = payload.locale
         session_record.region_code = payload.region_code
         session_record.latest_risk = answer["risk_level"]
+        if user_record:
+            session_record.user_id = user_record.id
 
         if _should_refresh_summary(db, session_record.id, profile_changed):
             recent_for_summary = (
@@ -345,6 +512,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 locale=payload.locale,
             )
 
+        if user_record:
+            upsert_session_graph(
+                db,
+                user=user_record,
+                session_record=session_record,
+                user_message=payload.message,
+                answer=answer,
+                locale=payload.locale,
+                risk_triggers=initial_risk.triggers,
+            )
+
         db.commit()
 
         response = ChatResponse(
@@ -353,6 +531,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 session_id=session_record.id,
                 used_context_turns=used_context_turns,
                 model=model_name,
+                user_id=user_record.id if user_record else None,
             ),
         )
         return response
@@ -397,20 +576,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             .scalars()
             .all()
         )
-        return SessionListResponse(
-            sessions=[
-                SessionItem(
-                    id=s.id,
-                    device_id=s.device_id,
-                    locale=s.locale,
-                    region_code=s.region_code,
-                    latest_risk=s.latest_risk,
-                    created_at=s.created_at,
-                    updated_at=s.updated_at,
-                )
-                for s in sessions
-            ]
-        )
+        return SessionListResponse(sessions=[_serialize_session_item(s) for s in sessions])
 
     @app.delete(f"{app_settings.api_prefix}/sessions/{{session_id}}")
     def delete_session(session_id: str, db: Session = Depends(db_dependency)) -> dict:
@@ -429,14 +595,20 @@ def _risk_priority(risk: str) -> int:
     return {"emergency": 100, "high": 80, "medium": 50, "low": 20}.get(risk, 20)
 
 
-def _get_or_create_session(db: Session, payload: ChatRequest) -> SessionRecord:
+def _get_or_create_session(db: Session, payload: ChatRequest, user_record: UserRecord | None) -> SessionRecord:
     if payload.session_id:
         session_record = db.get(SessionRecord, payload.session_id)
-        if not session_record or session_record.device_id != payload.device_id:
+        if not session_record:
+            raise HTTPException(status_code=404, detail="Session not found for device")
+        if user_record:
+            if session_record.user_id and session_record.user_id != user_record.id:
+                raise HTTPException(status_code=404, detail="Session not found for user")
+        elif payload.device_id and session_record.device_id != payload.device_id:
             raise HTTPException(status_code=404, detail="Session not found for device")
         return session_record
 
     session_record = SessionRecord(
+        user_id=user_record.id if user_record else None,
         device_id=payload.device_id,
         locale=payload.locale,
         region_code=payload.region_code,
@@ -449,6 +621,15 @@ def _get_or_create_session(db: Session, payload: ChatRequest) -> SessionRecord:
     db.add(session_record)
     db.flush()
     return session_record
+
+
+def _resolve_user_record(db: Session, payload: ChatRequest) -> UserRecord | None:
+    if payload.user_id:
+        user = db.get(UserRecord, payload.user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        return user
+    return None
 
 
 def _merge_profile(session_record: SessionRecord, incoming: dict | None) -> bool:
@@ -600,6 +781,8 @@ def _ensure_sessions_triage_columns(engine) -> None:
     inspector = inspect(engine)
     columns = {col["name"] for col in inspector.get_columns("sessions")}
     with engine.begin() as conn:
+        if "user_id" not in columns:
+            conn.execute(text("ALTER TABLE sessions ADD COLUMN user_id VARCHAR(36)"))
         if "triage_stage" not in columns:
             conn.execute(text("ALTER TABLE sessions ADD COLUMN triage_stage VARCHAR(16) DEFAULT 'intake'"))
             conn.execute(text("UPDATE sessions SET triage_stage = 'intake' WHERE triage_stage IS NULL"))
@@ -639,6 +822,52 @@ def _build_required_slots(
     recent_messages: list[dict[str, str]],
 ) -> list[str]:
     return runtime_build_required_slots(locale, current_message, health_profile, recent_messages)
+
+
+def _persistent_values(db: Session, user_id: str, node_type: str) -> list[str]:
+    from .models import UserGraphNodeRecord
+
+    return [
+        node.label
+        for node in db.execute(
+            select(UserGraphNodeRecord).where(
+                UserGraphNodeRecord.user_id == user_id,
+                UserGraphNodeRecord.node_type == node_type,
+            )
+        )
+        .scalars()
+        .all()
+    ]
+
+
+def _serialize_user_profile(db: Session, user: UserRecord) -> UserProfile:
+    return UserProfile(
+        id=user.id,
+        username=user.username,
+        locale=user.locale,
+        region_code=user.region_code,
+        birth_year=user.birth_year or "",
+        sex=user.sex or "",
+        conditions=_persistent_values(db, user.id, "condition"),
+        medications=_persistent_values(db, user.id, "medication"),
+        allergies=_persistent_values(db, user.id, "allergy"),
+        created_at=user.created_at,
+        updated_at=user.updated_at,
+        last_active_at=user.last_active_at,
+    )
+
+
+def _serialize_session_item(session: SessionRecord) -> SessionItem:
+    return SessionItem(
+        id=session.id,
+        device_id=session.device_id,
+        user_id=session.user_id,
+        locale=session.locale,
+        region_code=session.region_code,
+        latest_risk=session.latest_risk,
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+    )
 
 
 app = create_app()

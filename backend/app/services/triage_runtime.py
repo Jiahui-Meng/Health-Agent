@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from ..config import Settings
 from ..models import MessageRecord, SessionRecord
 from .context_builder import build_context
+from .graph_service import get_graph_bundle
 from .safety import classify_risk
 
 MIN_TRIAGE_ROUNDS = 3
@@ -27,6 +28,7 @@ class SessionContextResult:
     triage_round_count: int
     recent_messages: list[dict[str, str]]
     used_turns: int
+    graph_context: dict
 
 
 def choose_forced_stage(current_stage: str, next_round: int) -> str | None:
@@ -159,6 +161,7 @@ def build_session_context(
         triage_round_count=session_record.triage_round_count or 0,
         recent_messages=context.recent_messages,
         used_turns=context.used_turns,
+        graph_context=get_graph_bundle(db, session_record.user_id, session_record.id).__dict__ if session_record.user_id else {},
     )
 
 

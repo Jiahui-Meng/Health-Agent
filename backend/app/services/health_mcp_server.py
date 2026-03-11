@@ -151,6 +151,7 @@ def _handle_tool_call(db: Session, params: dict[str, Any]) -> dict[str, Any]:
                 "triage_round_count": context.triage_round_count,
                 "recent_messages": context.recent_messages,
                 "used_turns": context.used_turns,
+                "graph_context": context.graph_context,
             }
         if name == "analyze_health_input":
             return analyze_health_input(

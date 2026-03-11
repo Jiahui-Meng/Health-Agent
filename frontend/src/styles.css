@@ -167,6 +167,94 @@ textarea {
   color: #28493f;
 }
 
+.profile-summary h3 {
+  margin: 0;
+  font-size: 0.96rem;
+}
+
+.summary-group {
+  display: grid;
+  gap: 6px;
+}
+
+.summary-label {
+  font-size: 0.73rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #5f766d;
+  font-weight: 700;
+}
+
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.summary-chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 9px;
+  font-size: 0.78rem;
+  background: #dff1ea;
+  color: #1f4b3f;
+}
+
+.summary-chip-muted {
+  background: #e8f1ee;
+  color: #48655b;
+}
+
+.summary-chip-warn {
+  background: #fff0dc;
+  color: #8a4b12;
+}
+
+.journey-list,
+.risk-summary-list {
+  display: grid;
+  gap: 8px;
+}
+
+.journey-card {
+  display: grid;
+  gap: 6px;
+  border: 1px solid #d9e5df;
+  background: #ffffff;
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.journey-head {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.journey-card strong {
+  font-size: 0.86rem;
+  line-height: 1.35;
+}
+
+.journey-card p {
+  font-size: 0.8rem;
+  color: #466157;
+}
+
+.risk-summary-item {
+  display: grid;
+  gap: 6px;
+  border: 1px solid #ead8c8;
+  background: #fff8f1;
+  border-radius: 10px;
+  padding: 9px;
+}
+
+.risk-summary-item-muted {
+  border-style: dashed;
+  background: #faf7f2;
+}
+
 .chat-panel {
   display: grid;
   grid-template-rows: 1fr auto;

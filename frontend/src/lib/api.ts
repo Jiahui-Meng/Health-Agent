@@ -11,7 +11,8 @@ export type HealthProfile = {
 }
 
 export type ChatRequest = {
-  device_id: string
+  device_id?: string
+  user_id?: string
   locale: string
   region_code: string
   message: string
@@ -33,17 +34,102 @@ export type ChatResponse = {
     session_id: string
     used_context_turns: number
     model: string
+    user_id?: string | null
   }
 }
 
 export type SessionItem = {
   id: string
   device_id: string
+  user_id?: string | null
   locale: string
   region_code: string
   latest_risk: RiskLevel
   created_at: string
   updated_at: string
+}
+
+export type UserProfile = {
+  id: string
+  username: string
+  locale: string
+  region_code: string
+  birth_year: string
+  sex: string
+  conditions: string[]
+  medications: string[]
+  allergies: string[]
+  created_at: string
+  updated_at: string
+  last_active_at: string
+}
+
+export type UserCreateRequest = {
+  username: string
+  locale: string
+  region_code: string
+  birth_year: string
+  sex: string
+  conditions: string[]
+  medications: string[]
+  allergies: string[]
+}
+
+export type UserUpdateRequest = Partial<Omit<UserCreateRequest, 'username'>> & {
+  mark_active?: boolean
+}
+
+export type GraphSummaryBundle = {
+  persistent_features: Record<string, string[]>
+  profile_highlights?: string[]
+  recent_timeline: Array<{ node_type: string; label: string; payload: Record<string, unknown> }>
+  recent_journey?: Array<{
+    title: string
+    detail: string
+    session_id: string
+    is_current_session: boolean
+    sort_time: string
+    severity_hint: RiskLevel | string
+  }>
+  risk_signals: Array<
+    | string
+    | {
+        label: string
+        risk_level: RiskLevel | string
+        session_id: string
+        is_current_session: boolean
+        is_active: boolean
+        sort_time: string
+      }
+  >
+  summary_labels: string[]
+}
+
+export type UserGraphResponse = {
+  user_id: string
+  nodes: Array<{
+    id: string
+    node_type: string
+    label: string
+    payload: Record<string, unknown>
+    source: string
+    created_at: string
+    updated_at: string
+  }>
+  edges: Array<{
+    id: string
+    from_node_id: string
+    to_node_id: string
+    edge_type: string
+    payload: Record<string, unknown>
+    created_at: string
+  }>
+  summary_bundle: GraphSummaryBundle
+}
+
+export type LegacyImportRequest = {
+  profiles: UserCreateRequest[]
+  active_username?: string
 }
 
 export type MessageItem = {
@@ -114,6 +200,10 @@ export async function getSessions(deviceId: string): Promise<{ sessions: Session
   return callApi<{ sessions: SessionItem[] }>(`/api/v1/sessions/${deviceId}`)
 }
 
+export async function getUserSessions(userId: string): Promise<{ sessions: SessionItem[] }> {
+  return callApi<{ sessions: SessionItem[] }>(`/api/v1/users/${userId}/sessions`)
+}
+
 export async function getMessages(sessionId: string): Promise<{ session_id: string; messages: MessageItem[] }> {
   return callApi<{ session_id: string; messages: MessageItem[] }>(`/api/v1/sessions/${sessionId}/messages`)
 }
@@ -148,5 +238,40 @@ export async function startOAuthLogin(): Promise<OAuthAction> {
 export async function logoutOAuth(): Promise<OAuthAction> {
   return callApi<OAuthAction>('/api/v1/auth/oauth/logout', {
     method: 'POST',
+  })
+}
+
+export async function getUsers(): Promise<{ users: UserProfile[] }> {
+  return callApi<{ users: UserProfile[] }>('/api/v1/users')
+}
+
+export async function createUser(payload: UserCreateRequest): Promise<UserProfile> {
+  return callApi<UserProfile>('/api/v1/users', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function updateUser(userId: string, payload: UserUpdateRequest): Promise<UserProfile> {
+  return callApi<UserProfile>(`/api/v1/users/${userId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function deleteUser(userId: string): Promise<{ deleted: boolean; user_id: string }> {
+  return callApi<{ deleted: boolean; user_id: string }>(`/api/v1/users/${userId}`, {
+    method: 'DELETE',
+  })
+}
+
+export async function getUserGraph(userId: string): Promise<UserGraphResponse> {
+  return callApi<UserGraphResponse>(`/api/v1/users/${userId}/graph`)
+}
+
+export async function importLegacyUsers(payload: LegacyImportRequest): Promise<{ users: UserProfile[] }> {
+  return callApi<{ users: UserProfile[] }>('/api/v1/users/import-legacy', {
+    method: 'POST',
+    body: JSON.stringify(payload),
   })
 }

@@ -4,30 +4,43 @@ import {
   HealthProfile,
   MessageItem,
   SessionItem,
+  UserCreateRequest,
+  UserGraphResponse,
+  UserProfile,
+  createUser,
   deleteSession,
-  getOAuthStatus,
   getMessages,
   getModelConfigStatus,
-  getSessions,
+  getOAuthStatus,
+  getUserGraph,
+  getUserSessions,
+  getUsers,
+  importLegacyUsers,
   logoutOAuth,
   postChat,
   saveModelConfig,
   startOAuthLogin,
+  updateUser,
 } from './lib/api'
 
 type ParsedAssistant = ChatResponse['answer']
 type ClientStatus = 'sending' | 'failed'
 type UIMessage = Omit<MessageItem, 'id'> & { id: number | string; client_status?: ClientStatus }
-
-type LocalUserProfile = {
-  username: string
-  locale: string
-  regionCode: string
-  birthYear: string
-  sex: string
-  conditions: string[]
-  medications: string[]
-  allergies: string[]
+type GraphJourneyCard = {
+  title: string
+  detail: string
+  session_id: string
+  is_current_session: boolean
+  sort_time: string
+  severity_hint: string
+}
+type GraphRiskCard = {
+  label: string
+  risk_level: string
+  session_id: string
+  is_current_session: boolean
+  is_active: boolean
+  sort_time: string
 }
 
 type UserDraft = {
@@ -41,6 +54,17 @@ type UserDraft = {
   allergiesText: string
 }
 
+type LegacyLocalUserProfile = {
+  username: string
+  locale: string
+  regionCode: string
+  birthYear: string
+  sex: string
+  conditions: string[]
+  medications: string[]
+  allergies: string[]
+}
+
 const BIGMODEL_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4'
 const BIGMODEL_DEFAULT_MODEL = 'glm-4.7-flash'
 const OPENAI_BASE_URL = 'https://api.openai.com/v1'
@@ -51,8 +75,8 @@ const CODEX_MODEL_OPTIONS = [
   { value: 'gpt-5.3-codex-spark', label: 'gpt-5.3-codex-spark (ChatGPT Pro preview)' },
   { value: 'gpt-5.1-codex-max', label: 'gpt-5.1-codex-max' },
 ] as const
-const USER_PROFILES_KEY = 'health_agent_user_profiles'
-const ACTIVE_USER_KEY = 'health_agent_active_user'
+const LEGACY_USER_PROFILES_KEY = 'health_agent_user_profiles'
+const LEGACY_ACTIVE_USER_KEY = 'health_agent_active_user'
 
 const UI_TEXT = {
   zh: {
@@ -103,7 +127,7 @@ const UI_TEXT = {
     saveUser: '保存用户',
     userModalTitle: '创建本地用户',
     userModalEditTitle: '编辑本地用户',
-    userModalDesc: '仅本地保存，不需要登录。你可以创建多个用户并切换。',
+    userModalDesc: '用户与历史会话保存在本地后端数据库中，不需要登录，可创建多个本地用户并切换。',
     usernameRequired: '用户名不能为空。',
     usernameDuplicated: '用户名已存在，请换一个。',
     startPrompt: '请先描述你的症状、持续时间和变化情况。',
@@ -121,6 +145,18 @@ const UI_TEXT = {
     saveAndStart: '保存并开始',
     intakeTag: '问诊中',
     intakeHint: '请按下面问题补充信息，系统会在 3-5 轮后给出总结建议。',
+    graphSummary: '健康图谱摘要',
+    graphLongTerm: '长期特征',
+    graphTimeline: '近期症状时间线',
+    graphRisk: '风险信号',
+    graphCurrent: '当前会话',
+    graphHistory: '近期历史',
+    graphActiveRisk: '当前重点',
+    graphHistoricalRisk: '历史记录',
+    graphNoLongTerm: '暂无长期健康特征',
+    graphNoJourney: '暂无可展示的病程演化',
+    graphNoRisk: '暂无重点风险信号',
+    graphProfileHighlights: '档案概览',
     risk: {
       low: '低风险',
       medium: '中风险',
@@ -176,7 +212,7 @@ const UI_TEXT = {
     saveUser: 'Save User',
     userModalTitle: 'Create Local User',
     userModalEditTitle: 'Edit Local User',
-    userModalDesc: 'Stored locally only. No login required. You can create and switch multiple users.',
+    userModalDesc: 'Users and session history are stored in the local backend database. No login required.',
     usernameRequired: 'Username is required.',
     usernameDuplicated: 'Username already exists.',
     startPrompt: 'Start by describing your symptoms and concerns.',
@@ -194,6 +230,18 @@ const UI_TEXT = {
     saveAndStart: 'Save and Start',
     intakeTag: 'Intake',
     intakeHint: 'Please answer the questions below. A conclusion is generated after 3-5 rounds.',
+    graphSummary: 'Health Graph Summary',
+    graphLongTerm: 'Longitudinal Features',
+    graphTimeline: 'Recent Symptom Timeline',
+    graphRisk: 'Risk Signals',
+    graphCurrent: 'Current Session',
+    graphHistory: 'Recent History',
+    graphActiveRisk: 'Active Focus',
+    graphHistoricalRisk: 'History',
+    graphNoLongTerm: 'No longitudinal features yet.',
+    graphNoJourney: 'No symptom journey available yet.',
+    graphNoRisk: 'No notable risk signals yet.',
+    graphProfileHighlights: 'Profile Highlights',
     risk: {
       low: 'LOW',
       medium: 'MEDIUM',
@@ -239,10 +287,61 @@ function buildDeviceId(username: string): string {
   return `device_${slug || 'local_user'}`
 }
 
-function loadProfilesFromStorage(): { profiles: LocalUserProfile[]; activeUsername: string } {
+function isRiskObject(
+  item: UserGraphResponse['summary_bundle']['risk_signals'][number],
+): item is Exclude<UserGraphResponse['summary_bundle']['risk_signals'][number], string> {
+  return typeof item === 'object' && item !== null && 'label' in item
+}
+
+function normalizeJourney(userGraph: UserGraphResponse | null): GraphJourneyCard[] {
+  const journey = userGraph?.summary_bundle.recent_journey
+  if (journey && journey.length > 0) {
+    return journey.map((item) => ({
+      title: item.title,
+      detail: item.detail,
+      session_id: item.session_id,
+      is_current_session: item.is_current_session,
+      sort_time: item.sort_time,
+      severity_hint: String(item.severity_hint || 'low'),
+    }))
+  }
+  return (userGraph?.summary_bundle.recent_timeline || []).slice(0, 5).map((item, index) => ({
+    title: item.label,
+    detail: String(item.payload?.message || ''),
+    session_id: String(item.payload?.session_id || ''),
+    is_current_session: index === 0,
+    sort_time: '',
+    severity_hint: 'low',
+  }))
+}
+
+function normalizeRiskSignals(userGraph: UserGraphResponse | null): GraphRiskCard[] {
+  return (userGraph?.summary_bundle.risk_signals || []).map((item, index) => {
+    if (isRiskObject(item)) {
+      return {
+        label: item.label,
+        risk_level: String(item.risk_level || 'medium'),
+        session_id: item.session_id,
+        is_current_session: item.is_current_session,
+        is_active: item.is_active,
+        sort_time: item.sort_time,
+      }
+    }
+    return {
+      label: String(item),
+      risk_level: 'medium',
+      session_id: '',
+      is_current_session: index === 0,
+      is_active: index === 0,
+      sort_time: '',
+    }
+  })
+}
+
+function loadLegacyProfilesFromStorage(): { profiles: LegacyLocalUserProfile[]; activeUsername: string } {
   try {
-    const rawProfiles = localStorage.getItem(USER_PROFILES_KEY)
-    const rawActive = localStorage.getItem(ACTIVE_USER_KEY) || ''
+    const rawProfiles = localStorage.getItem(LEGACY_USER_PROFILES_KEY)
+    const rawActive = localStorage.getItem(LEGACY_ACTIVE_USER_KEY) || ''
     const parsed = rawProfiles ? (JSON.parse(rawProfiles) as Array<Record<string, unknown>>) : []
     const profiles = Array.isArray(parsed)
       ? parsed
@@ -258,14 +357,19 @@ function loadProfilesFromStorage(): { profiles: LocalUserProfile[]; activeUserna
               conditions: Array.isArray(item.conditions) ? item.conditions.map((v) => String(v)) : [],
               medications: Array.isArray(item.medications) ? item.medications.map((v) => String(v)) : [],
               allergies: Array.isArray(item.allergies) ? item.allergies.map((v) => String(v)) : [],
-            } satisfies LocalUserProfile
+            } satisfies LegacyLocalUserProfile
           })
-          .filter((item): item is LocalUserProfile => item !== null)
+          .filter((item): item is LegacyLocalUserProfile => item !== null)
       : []
     return { profiles, activeUsername: rawActive }
   } catch {
     return { profiles: [], activeUsername: '' }
   }
+}
+
+function clearLegacyProfilesFromStorage() {
+  localStorage.removeItem(LEGACY_USER_PROFILES_KEY)
+  localStorage.removeItem(LEGACY_ACTIVE_USER_KEY)
 }
 
 function blankDraft(): UserDraft {
@@ -281,25 +385,25 @@ function blankDraft(): UserDraft {
   }
 }
 
-function profileToDraft(profile: LocalUserProfile): UserDraft {
+function userToDraft(user: UserProfile): UserDraft {
   return {
-    username: profile.username,
-    locale: profile.locale,
-    regionCode: profile.regionCode,
-    birthYear: profile.birthYear,
-    sex: profile.sex,
-    conditionsText: toCsv(profile.conditions),
-    medicationsText: toCsv(profile.medications),
-    allergiesText: toCsv(profile.allergies),
+    username: user.username,
+    locale: user.locale,
+    regionCode: user.region_code,
+    birthYear: user.birth_year,
+    sex: user.sex,
+    conditionsText: toCsv(user.conditions),
+    medicationsText: toCsv(user.medications),
+    allergiesText: toCsv(user.allergies),
   }
 }
 
-function draftToProfile(draft: UserDraft): LocalUserProfile {
+function draftToPayload(draft: UserDraft): UserCreateRequest {
   return {
     username: normalizeUsername(draft.username),
     locale: draft.locale,
-    regionCode: draft.regionCode,
-    birthYear: draft.birthYear.trim(),
+    region_code: draft.regionCode,
+    birth_year: draft.birthYear.trim(),
     sex: draft.sex.trim(),
     conditions: toList(draft.conditionsText),
     medications: toList(draft.medicationsText),
@@ -309,9 +413,10 @@ function draftToProfile(draft: UserDraft): LocalUserProfile {
 
 export default function App() {
   const [sessionId, setSessionId] = useState<string | undefined>(undefined)
+  const [users, setUsers] = useState<UserProfile[]>([])
+  const [activeUserId, setActiveUserId] = useState('')
+  const [userGraph, setUserGraph] = useState<UserGraphResponse | null>(null)
 
-  const [profiles, setProfiles] = useState<LocalUserProfile[]>([])
-  const [activeUsername, setActiveUsername] = useState('')
   const [showUserModal, setShowUserModal] = useState(false)
   const [isEditingUser, setIsEditingUser] = useState(false)
   const [userDraft, setUserDraft] = useState<UserDraft>(blankDraft())
@@ -327,7 +432,6 @@ export default function App() {
   const [modelConfigured, setModelConfigured] = useState(false)
   const [showModelConfigModal, setShowModelConfigModal] = useState(false)
   const [showApiConfigForm, setShowApiConfigForm] = useState(false)
-
   const [providerMode, setProviderMode] = useState<'codex_cli' | 'http_api'>('codex_cli')
   const [modelBaseUrl, setModelBaseUrl] = useState(OPENAI_BASE_URL)
   const [modelName, setModelName] = useState(OPENAI_DEFAULT_MODEL)
@@ -342,75 +446,82 @@ export default function App() {
   const [mcpStatusMessage, setMcpStatusMessage] = useState('')
   const [oauthActionLoading, setOauthActionLoading] = useState(false)
 
-  const activeProfile = useMemo(
-    () => profiles.find((profile) => profile.username === activeUsername) || null,
-    [profiles, activeUsername],
-  )
-
-  const activeLocale = activeProfile?.locale || 'zh-CN'
+  const activeUser = useMemo(() => users.find((user) => user.id === activeUserId) || null, [users, activeUserId])
+  const activeLocale = activeUser?.locale || 'zh-CN'
   const displayLocale = showUserModal ? userDraft.locale || activeLocale : activeLocale
-  const regionCode = activeProfile?.regionCode || 'HK'
+  const regionCode = activeUser?.region_code || 'HK'
   const isZh = displayLocale.startsWith('zh')
   const t = isZh ? UI_TEXT.zh : UI_TEXT.en
+  const deviceId = useMemo(() => (activeUser ? buildDeviceId(activeUser.username) : ''), [activeUser])
 
-  const deviceId = useMemo(() => (activeProfile ? buildDeviceId(activeProfile.username) : ''), [activeProfile])
-
-  const profile = useMemo<HealthProfile>(
+  const healthProfile = useMemo<HealthProfile>(
     () => ({
-      age_range: activeProfile?.birthYear
-        ? `${activeLocale.startsWith('zh') ? '出生年份' : 'Birth year'}: ${activeProfile.birthYear}`
+      age_range: activeUser?.birth_year
+        ? `${activeLocale.startsWith('zh') ? '出生年份' : 'Birth year'}: ${activeUser.birth_year}`
         : undefined,
-      sex: activeProfile?.sex || undefined,
-      conditions: activeProfile?.conditions || [],
-      medications: activeProfile?.medications || [],
-      allergies: activeProfile?.allergies || [],
+      sex: activeUser?.sex || undefined,
+      conditions: activeUser?.conditions || [],
+      medications: activeUser?.medications || [],
+      allergies: activeUser?.allergies || [],
     }),
-    [activeProfile, activeLocale],
+    [activeLocale, activeUser],
   )
 
   useEffect(() => {
-    const { profiles: storedProfiles, activeUsername: storedActive } = loadProfilesFromStorage()
-    setProfiles(storedProfiles)
-
-    if (storedProfiles.length > 0) {
-      const exists = storedProfiles.some((p) => p.username === storedActive)
-      setActiveUsername(exists ? storedActive : storedProfiles[0].username)
-      setShowUserModal(false)
-    } else {
-      setShowUserModal(true)
-      setIsEditingUser(false)
-      setUserDraft(blankDraft())
-    }
-  }, [])
-
-  useEffect(() => {
-    localStorage.setItem(USER_PROFILES_KEY, JSON.stringify(profiles))
-  }, [profiles])
-
-  useEffect(() => {
-    if (activeUsername) {
-      localStorage.setItem(ACTIVE_USER_KEY, activeUsername)
-    }
-  }, [activeUsername])
-
-  useEffect(() => {
-    async function bootstrapModelConfig() {
+    async function bootstrap() {
       setCheckingModelConfig(true)
       try {
-        const status = await getModelConfigStatus()
-        const nextProvider = status.provider_mode === 'http_api' ? 'http_api' : 'codex_cli'
+        const modelStatus = await getModelConfigStatus()
+        const nextProvider = modelStatus.provider_mode === 'http_api' ? 'http_api' : 'codex_cli'
         setProviderMode(nextProvider)
-        setModelBaseUrl(status.base_url || OPENAI_BASE_URL)
-        setModelName(status.model_name || OPENAI_DEFAULT_MODEL)
-        setModelConfigured(status.configured)
-        setOauthCliAvailable(status.oauth_cli_available)
-        setOauthLoggedIn(status.oauth_logged_in)
-        setOauthStatusMessage(status.oauth_status_message || '')
-        setOauthAccountId(status.oauth_account_id || null)
-        setMcpAvailable(status.mcp_available)
-        setMcpStatusMessage(status.mcp_status_message || '')
-        setShowModelConfigModal(!status.configured)
-        setShowApiConfigForm(!status.configured)
+        setModelBaseUrl(modelStatus.base_url || OPENAI_BASE_URL)
+        setModelName(modelStatus.model_name || OPENAI_DEFAULT_MODEL)
+        setModelConfigured(modelStatus.configured)
+        setOauthCliAvailable(modelStatus.oauth_cli_available)
+        setOauthLoggedIn(modelStatus.oauth_logged_in)
+        setOauthStatusMessage(modelStatus.oauth_status_message || '')
+        setOauthAccountId(modelStatus.oauth_account_id || null)
+        setMcpAvailable(modelStatus.mcp_available)
+        setMcpStatusMessage(modelStatus.mcp_status_message || '')
+        setShowModelConfigModal(!modelStatus.configured)
+        setShowApiConfigForm(!modelStatus.configured)
+
+        let fetchedUsers = (await getUsers()).users
+        let importedActiveUsername = ''
+        if (fetchedUsers.length === 0) {
+          const legacy = loadLegacyProfilesFromStorage()
+          if (legacy.profiles.length > 0) {
+            importedActiveUsername = legacy.activeUsername || ''
+            fetchedUsers = (
+              await importLegacyUsers({
+                profiles: legacy.profiles.map((profile) => ({
+                  username: profile.username,
+                  locale: profile.locale,
+                  region_code: profile.regionCode,
+                  birth_year: profile.birthYear,
+                  sex: profile.sex,
+                  conditions: profile.conditions,
+                  medications: profile.medications,
+                  allergies: profile.allergies,
+                })),
+                active_username: legacy.activeUsername || undefined,
+              })
+            ).users
+            clearLegacyProfilesFromStorage()
+          }
+        }
+
+        setUsers(fetchedUsers)
+        if (fetchedUsers.length > 0) {
+          const preferredUser =
+            fetchedUsers.find((user) => user.username === importedActiveUsername) || fetchedUsers[0]
+          setActiveUserId(preferredUser.id)
+          setShowUserModal(false)
+        } else {
+          setShowUserModal(true)
+          setIsEditingUser(false)
+          setUserDraft(blankDraft())
+        }
       } catch (e) {
         setError((e as Error).message)
       } finally {
@@ -418,19 +529,19 @@ export default function App() {
       }
     }
 
-    bootstrapModelConfig().catch((e) => setError((e as Error).message))
+    bootstrap().catch((e) => setError((e as Error).message))
   }, [])
 
   useEffect(() => {
     async function syncSessions() {
-      if (!modelConfigured || !deviceId) {
+      if (!activeUserId) {
         setSessions([])
         setMessages([])
         setSessionId(undefined)
         return
       }
       try {
-        const data = await getSessions(deviceId)
+        const data = await getUserSessions(activeUserId)
         setSessions(data.sessions)
       } catch (e) {
         setError((e as Error).message)
@@ -438,15 +549,47 @@ export default function App() {
     }
 
     syncSessions().catch((e) => setError((e as Error).message))
-  }, [modelConfigured, deviceId])
+  }, [activeUserId])
+
+  useEffect(() => {
+    async function syncGraph() {
+      if (!activeUserId) {
+        setUserGraph(null)
+        return
+      }
+      try {
+        const graph = await getUserGraph(activeUserId)
+        setUserGraph(graph)
+      } catch (e) {
+        setError((e as Error).message)
+      }
+    }
+
+    syncGraph().catch((e) => setError((e as Error).message))
+  }, [activeUserId, sessionId])
+
+  async function refreshUsers() {
+    const data = await getUsers()
+    setUsers(data.users)
+    return data.users
+  }
 
   async function refreshSessions() {
-    if (!deviceId) {
+    if (!activeUserId) {
       setSessions([])
       return
     }
-    const data = await getSessions(deviceId)
+    const data = await getUserSessions(activeUserId)
     setSessions(data.sessions)
+  }
+
+  async function refreshGraph() {
+    if (!activeUserId) {
+      setUserGraph(null)
+      return
+    }
+    const graph = await getUserGraph(activeUserId)
+    setUserGraph(graph)
   }
 
   async function loadMessages(targetSessionId: string) {
@@ -506,50 +649,63 @@ export default function App() {
   }
 
   function openEditUserModal() {
-    if (!activeProfile) return
+    if (!activeUser) return
     setIsEditingUser(true)
     setUserError('')
-    setUserDraft(profileToDraft(activeProfile))
+    setUserDraft(userToDraft(activeUser))
     setShowUserModal(true)
+  }
+
+  async function switchActiveUser(nextUserId: string) {
+    setActiveUserId(nextUserId)
+    setSessionId(undefined)
+    setMessages([])
+    setError('')
+    try {
+      await updateUser(nextUserId, { mark_active: true })
+      await refreshUsers()
+    } catch (e) {
+      setError((e as Error).message)
+    }
   }
 
   async function onSaveUser(event: FormEvent) {
     event.preventDefault()
-    const normalized = normalizeUsername(userDraft.username)
-    if (!normalized) {
+    const payload = draftToPayload(userDraft)
+    if (!payload.username) {
       setUserError(t.usernameRequired)
       return
     }
-
-    const duplicate = profiles.some(
-      (p) => p.username.toLowerCase() === normalized.toLowerCase() && p.username !== activeUsername,
-    )
-    if (duplicate) {
-      setUserError(t.usernameDuplicated)
-      return
-    }
-
-    const savedProfile = draftToProfile({ ...userDraft, username: normalized })
-
-    if (isEditingUser && activeProfile) {
-      setProfiles((prev) => prev.map((p) => (p.username === activeProfile.username ? savedProfile : p)))
-    } else {
-      setProfiles((prev) => [...prev, savedProfile])
-    }
-
-    setActiveUsername(savedProfile.username)
-    setShowUserModal(false)
-    setUserError('')
-    setMessages([])
-    setSessionId(undefined)
-    setError('')
-
-    if (modelConfigured) {
-      try {
-        await refreshSessions()
-      } catch (e) {
-        setError((e as Error).message)
+    try {
+      let saved: UserProfile
+      if (isEditingUser && activeUser) {
+        saved = await updateUser(activeUser.id, {
+          locale: payload.locale,
+          region_code: payload.region_code,
+          birth_year: payload.birth_year,
+          sex: payload.sex,
+          conditions: payload.conditions,
+          medications: payload.medications,
+          allergies: payload.allergies,
+          mark_active: true,
+        })
+      } else {
+        saved = await createUser(payload)
       }
+      const latestUsers = await refreshUsers()
+      const nextUser = latestUsers.find((user) => user.id === saved.id) || saved
+      setActiveUserId(nextUser.id)
+      setShowUserModal(false)
+      setUserError('')
+      setMessages([])
+      setSessionId(undefined)
+      setError('')
+      const [nextSessions, nextGraph] = await Promise.all([getUserSessions(nextUser.id), getUserGraph(nextUser.id)])
+      setSessions(nextSessions.sessions)
+      setUserGraph(nextGraph)
+    } catch (e) {
+      const message = (e as Error).message
+      setUserError(message.includes('409') ? t.usernameDuplicated : message)
     }
   }
 
@@ -588,7 +744,6 @@ export default function App() {
       setModelApiKey('')
       if (status.configured) {
         setShowApiConfigForm(false)
-        await refreshSessions()
       }
       return status.configured
     } catch (e) {
@@ -607,7 +762,7 @@ export default function App() {
   async function onSend(event: FormEvent) {
     event.preventDefault()
     const userText = input.trim()
-    if (!userText || !modelConfigured || !activeProfile || !deviceId) return
+    if (!userText || !modelConfigured || !activeUser) return
 
     setError('')
     const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -618,22 +773,25 @@ export default function App() {
       created_at: new Date().toISOString(),
       client_status: 'sending',
     }
+
     setMessages((prev) => [...prev, optimisticMessage])
     setInput('')
     setLoading(true)
     try {
       const res = await postChat({
+        user_id: activeUser.id,
         device_id: deviceId,
-        locale: activeLocale,
-        region_code: regionCode,
+        locale: activeUser.locale,
+        region_code: activeUser.region_code,
         message: userText,
-        health_profile: profile,
+        health_profile: healthProfile,
         session_id: sessionId,
       })
-
       const nextSession = res.meta.session_id
       await loadMessages(nextSession)
       await refreshSessions()
+      await refreshGraph()
+      await refreshUsers()
     } catch (e) {
       setMessages((prev) =>
         prev.map((msg) => (msg.id === tempId ? { ...msg, client_status: 'failed' } : msg)),
@@ -653,6 +811,7 @@ export default function App() {
         setMessages([])
       }
       await refreshSessions()
+      await refreshGraph()
     } catch (e) {
       setError((e as Error).message)
     }
@@ -664,6 +823,15 @@ export default function App() {
     high: 'var(--risk-high)',
     emergency: 'var(--risk-emergency)',
   }
+
+  const graphPersistent = userGraph?.summary_bundle.persistent_features || {}
+  const graphHighlights = userGraph?.summary_bundle.profile_highlights || []
+  const graphJourney = normalizeJourney(userGraph)
+  const graphRiskSignals = normalizeRiskSignals(userGraph)
+  const graphActiveSignals = graphRiskSignals.filter((item) => item.is_active || item.is_current_session).slice(0, 2)
+  const graphHistoricalSignals = graphRiskSignals
+    .filter((item) => !graphActiveSignals.some((active) => active.label === item.label && active.session_id === item.session_id))
+    .slice(0, 3)
 
   return (
     <div className="page">
@@ -677,23 +845,14 @@ export default function App() {
         <aside className="panel left-panel">
           <h2>{t.userProfile}</h2>
 
-          {activeProfile ? (
+          {activeUser ? (
             <div className="grid">
               <label>
                 {t.currentUser}
-                <select
-                  value={activeUsername}
-                  onChange={(e) => {
-                    const next = e.target.value
-                    setActiveUsername(next)
-                    setSessionId(undefined)
-                    setMessages([])
-                    setError('')
-                  }}
-                >
-                  {profiles.map((profileItem) => (
-                    <option key={profileItem.username} value={profileItem.username}>
-                      {profileItem.username}
+                <select value={activeUserId} onChange={(e) => void switchActiveUser(e.target.value)}>
+                  {users.map((user) => (
+                    <option key={user.id} value={user.id}>
+                      {user.username}
                     </option>
                   ))}
                 </select>
@@ -710,35 +869,147 @@ export default function App() {
 
               <div className="profile-summary">
                 <p>
-                  {t.locale}: {activeProfile.locale}
+                  {t.locale}: {activeUser.locale}
                 </p>
                 <p>
-                  {t.region}: {activeProfile.regionCode}
+                  {t.region}: {activeUser.region_code}
                 </p>
-                {activeProfile.birthYear && (
+                {activeUser.birth_year && (
                   <p>
-                    {t.birthYear}: {activeProfile.birthYear}
+                    {t.birthYear}: {activeUser.birth_year}
                   </p>
                 )}
-                {activeProfile.sex && (
+                {activeUser.sex && (
                   <p>
-                    {t.sex}: {activeProfile.sex}
+                    {t.sex}: {activeUser.sex}
                   </p>
                 )}
-                {activeProfile.conditions.length > 0 && (
+                {activeUser.conditions.length > 0 && (
                   <p>
-                    {t.conditions}: {toCsv(activeProfile.conditions)}
+                    {t.conditions}: {toCsv(activeUser.conditions)}
                   </p>
                 )}
-                {activeProfile.medications.length > 0 && (
+                {activeUser.medications.length > 0 && (
                   <p>
-                    {t.medications}: {toCsv(activeProfile.medications)}
+                    {t.medications}: {toCsv(activeUser.medications)}
                   </p>
                 )}
-                {activeProfile.allergies.length > 0 && (
+                {activeUser.allergies.length > 0 && (
                   <p>
-                    {t.allergies}: {toCsv(activeProfile.allergies)}
+                    {t.allergies}: {toCsv(activeUser.allergies)}
                   </p>
+                )}
+              </div>
+
+              <div className="profile-summary">
+                <h3>{t.graphLongTerm}</h3>
+                {graphHighlights.length > 0 && (
+                  <div className="chip-row">
+                    {graphHighlights.map((item) => (
+                      <span key={item} className="summary-chip summary-chip-muted">
+                        {item}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {graphPersistent.conditions?.length ? (
+                  <div className="summary-group">
+                    <span className="summary-label">{t.conditions}</span>
+                    <div className="chip-row">
+                      {graphPersistent.conditions.map((item) => (
+                        <span key={`condition-${item}`} className="summary-chip">
+                          {item}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+                {graphPersistent.medications?.length ? (
+                  <div className="summary-group">
+                    <span className="summary-label">{t.medications}</span>
+                    <div className="chip-row">
+                      {graphPersistent.medications.map((item) => (
+                        <span key={`medication-${item}`} className="summary-chip">
+                          {item}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+                {graphPersistent.allergies?.length ? (
+                  <div className="summary-group">
+                    <span className="summary-label">{t.allergies}</span>
+                    <div className="chip-row">
+                      {graphPersistent.allergies.map((item) => (
+                        <span key={`allergy-${item}`} className="summary-chip summary-chip-warn">
+                          {item}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+                {!graphPersistent.conditions?.length && !graphPersistent.medications?.length && !graphPersistent.allergies?.length && (
+                  <p className="placeholder">{t.graphNoLongTerm}</p>
+                )}
+              </div>
+
+              <div className="profile-summary">
+                <h3>{t.graphTimeline}</h3>
+                {graphJourney.length > 0 ? (
+                  <div className="journey-list">
+                    {graphJourney.slice(0, 5).map((item, index) => (
+                      <article key={`${item.session_id}-${item.title}-${index}`} className="journey-card">
+                        <div className="journey-head">
+                          <span className={`summary-chip summary-chip-${item.severity_hint === 'medium' ? 'warn' : 'muted'}`}>
+                            {item.is_current_session ? t.graphCurrent : t.graphHistory}
+                          </span>
+                        </div>
+                        <strong>{item.title}</strong>
+                        {item.detail && <p>{item.detail}</p>}
+                      </article>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="placeholder">{t.graphNoJourney}</p>
+                )}
+              </div>
+
+              <div className="profile-summary">
+                <h3>{t.graphRisk}</h3>
+                {graphActiveSignals.length > 0 || graphHistoricalSignals.length > 0 ? (
+                  <div className="risk-summary-list">
+                    {graphActiveSignals.length > 0 && (
+                      <div className="summary-group">
+                        <span className="summary-label">{t.graphActiveRisk}</span>
+                        {graphActiveSignals.map((signal, index) => (
+                          <div key={`${signal.label}-${signal.session_id}-${index}`} className="risk-summary-item">
+                            <span
+                              className="risk-tag"
+                              style={{ background: riskColor[signal.risk_level] || '#495057', marginBottom: 0 }}
+                            >
+                              {t.risk[signal.risk_level as keyof typeof t.risk] || signal.risk_level.toUpperCase()}
+                            </span>
+                            <p>{signal.label}</p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {graphHistoricalSignals.length > 0 && (
+                      <div className="summary-group">
+                        <span className="summary-label">{t.graphHistoricalRisk}</span>
+                        {graphHistoricalSignals.map((signal, index) => (
+                          <div key={`${signal.label}-${signal.session_id}-${index}`} className="risk-summary-item risk-summary-item-muted">
+                            <span className="summary-chip summary-chip-muted">
+                              {t.risk[signal.risk_level as keyof typeof t.risk] || signal.risk_level.toUpperCase()}
+                            </span>
+                            <p>{signal.label}</p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <p className="placeholder">{t.graphNoRisk}</p>
                 )}
               </div>
             </div>
@@ -762,13 +1033,7 @@ export default function App() {
             </p>
 
             {showApiConfigForm && (
-              <form
-                className="grid api-form"
-                onSubmit={async (event) => {
-                  event.preventDefault()
-                  await submitModelConfig()
-                }}
-              >
+              <form className="grid api-form" onSubmit={onSaveModelConfig}>
                 <label>
                   {t.providerMode}
                   <select
@@ -833,15 +1098,15 @@ export default function App() {
                 )}
                 {providerMode === 'codex_cli' && (
                   <div className="profile-summary">
-                      <p>
-                        {t.oauthStatus}: {oauthStatusMessage || '-'}
-                      </p>
-                      <p>CLI: {oauthCliAvailable ? 'available' : 'unavailable'}</p>
-                      <p>
-                        {t.mcpStatus}: {mcpAvailable ? 'available' : 'unavailable'}
-                        {mcpStatusMessage ? ` (${mcpStatusMessage})` : ''}
-                      </p>
-                      {oauthAccountId && <p>Account: {oauthAccountId}</p>}
+                    <p>
+                      {t.oauthStatus}: {oauthStatusMessage || '-'}
+                    </p>
+                    <p>CLI: {oauthCliAvailable ? 'available' : 'unavailable'}</p>
+                    <p>
+                      {t.mcpStatus}: {mcpAvailable ? 'available' : 'unavailable'}
+                      {mcpStatusMessage ? ` (${mcpStatusMessage})` : ''}
+                    </p>
+                    {oauthAccountId && <p>Account: {oauthAccountId}</p>}
                     <div className="user-actions">
                       <button type="button" onClick={onOAuthLogin} disabled={oauthActionLoading}>
                         {t.oauthLogin}
@@ -855,7 +1120,6 @@ export default function App() {
                     </button>
                   </div>
                 )}
-
                 <button type="submit" disabled={modelConfigSaving}>
                   {modelConfigSaving ? t.saving : t.saveApiConfig}
                 </button>
@@ -924,9 +1188,9 @@ export default function App() {
               onChange={(e) => setInput(e.target.value)}
               placeholder={t.composerPlaceholder}
               rows={4}
-              disabled={!modelConfigured || checkingModelConfig || !activeProfile}
+              disabled={!modelConfigured || checkingModelConfig || !activeUser}
             />
-            <button type="submit" disabled={loading || !modelConfigured || checkingModelConfig || !activeProfile}>
+            <button type="submit" disabled={loading || !modelConfigured || checkingModelConfig || !activeUser}>
               {loading ? t.thinking : t.send}
             </button>
           </form>
@@ -1051,57 +1315,57 @@ export default function App() {
             <h2>{t.modalTitle}</h2>
             <p>{t.modalDesc}</p>
             <form onSubmit={onSaveModelConfig} className="grid">
-                <label>
-                  {t.providerMode}
-                  <select
-                    value={providerMode}
-                    onChange={(e) => {
-                      const next = e.target.value as 'codex_cli' | 'http_api'
-                      setProviderMode(next)
-                      if (next === 'codex_cli') {
-                        setModelBaseUrl(OPENAI_BASE_URL)
-                        setModelName(OPENAI_DEFAULT_MODEL)
-                      } else {
-                        setModelBaseUrl(BIGMODEL_BASE_URL)
-                        setModelName(BIGMODEL_DEFAULT_MODEL)
-                      }
+              <label>
+                {t.providerMode}
+                <select
+                  value={providerMode}
+                  onChange={(e) => {
+                    const next = e.target.value as 'codex_cli' | 'http_api'
+                    setProviderMode(next)
+                    if (next === 'codex_cli') {
+                      setModelBaseUrl(OPENAI_BASE_URL)
+                      setModelName(OPENAI_DEFAULT_MODEL)
+                    } else {
+                      setModelBaseUrl(BIGMODEL_BASE_URL)
+                      setModelName(BIGMODEL_DEFAULT_MODEL)
+                    }
                   }}
                 >
                   <option value="codex_cli">{t.providerOAuth}</option>
                   <option value="http_api">{t.providerHttp}</option>
                 </select>
               </label>
-                {providerMode === 'http_api' && (
-                  <label>
-                    {t.baseUrl}
-                    <input
-                      value={modelBaseUrl}
-                      onChange={(e) => setModelBaseUrl(e.target.value)}
-                      placeholder={BIGMODEL_BASE_URL}
-                    />
-                  </label>
-                )}
-                {providerMode === 'codex_cli' ? (
-                  <label>
-                    {t.codexModel}
-                    <select value={modelName} onChange={(e) => setModelName(e.target.value)}>
-                      {CODEX_MODEL_OPTIONS.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : (
-                  <label>
-                    {t.modelName}
-                    <input
-                      value={modelName}
-                      onChange={(e) => setModelName(e.target.value)}
-                      placeholder={BIGMODEL_DEFAULT_MODEL}
-                    />
-                  </label>
-                )}
+              {providerMode === 'http_api' && (
+                <label>
+                  {t.baseUrl}
+                  <input
+                    value={modelBaseUrl}
+                    onChange={(e) => setModelBaseUrl(e.target.value)}
+                    placeholder={BIGMODEL_BASE_URL}
+                  />
+                </label>
+              )}
+              {providerMode === 'codex_cli' ? (
+                <label>
+                  {t.codexModel}
+                  <select value={modelName} onChange={(e) => setModelName(e.target.value)}>
+                    {CODEX_MODEL_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <label>
+                  {t.modelName}
+                  <input
+                    value={modelName}
+                    onChange={(e) => setModelName(e.target.value)}
+                    placeholder={BIGMODEL_DEFAULT_MODEL}
+                  />
+                </label>
+              )}
               {providerMode === 'http_api' && (
                 <label>
                   {t.apiKeyToken}
@@ -1115,15 +1379,15 @@ export default function App() {
               )}
               {providerMode === 'codex_cli' && (
                 <div className="profile-summary">
-                    <p>
-                      {t.oauthStatus}: {oauthStatusMessage || '-'}
-                    </p>
-                    <p>CLI: {oauthCliAvailable ? 'available' : 'unavailable'}</p>
-                    <p>
-                      {t.mcpStatus}: {mcpAvailable ? 'available' : 'unavailable'}
-                      {mcpStatusMessage ? ` (${mcpStatusMessage})` : ''}
-                    </p>
-                    {oauthAccountId && <p>Account: {oauthAccountId}</p>}
+                  <p>
+                    {t.oauthStatus}: {oauthStatusMessage || '-'}
+                  </p>
+                  <p>CLI: {oauthCliAvailable ? 'available' : 'unavailable'}</p>
+                  <p>
+                    {t.mcpStatus}: {mcpAvailable ? 'available' : 'unavailable'}
+                    {mcpStatusMessage ? ` (${mcpStatusMessage})` : ''}
+                  </p>
+                  {oauthAccountId && <p>Account: {oauthAccountId}</p>}
                   <div className="user-actions">
                     <button type="button" onClick={onOAuthLogin} disabled={oauthActionLoading}>
                       {t.oauthLogin}
@@ -1134,7 +1398,6 @@ export default function App() {
                   </div>
                 </div>
               )}
-
               <button type="submit" disabled={modelConfigSaving}>
                 {modelConfigSaving ? t.saving : t.saveAndStart}
               </button>

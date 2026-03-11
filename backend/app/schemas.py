@@ -20,7 +20,8 @@ class HealthProfile(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    device_id: str = Field(min_length=1, max_length=128)
+    device_id: str = ""
+    user_id: str | None = None
     locale: str = "zh-CN"
     region_code: str = "HK"
     message: str = Field(min_length=1)
@@ -42,6 +43,7 @@ class ChatMeta(BaseModel):
     session_id: str
     used_context_turns: int
     model: str
+    user_id: str | None = None
 
 
 class ChatResponse(BaseModel):
@@ -52,6 +54,7 @@ class ChatResponse(BaseModel):
 class SessionItem(BaseModel):
     id: str
     device_id: str
+    user_id: str | None = None
     locale: str
     region_code: str
     latest_risk: RiskLevel
@@ -116,3 +119,118 @@ class OAuthStatusResponse(BaseModel):
 class OAuthActionResponse(BaseModel):
     ok: bool
     message: str
+
+
+class UserProfile(BaseModel):
+    id: str
+    username: str
+    locale: str
+    region_code: str
+    birth_year: str = ""
+    sex: str = ""
+    conditions: list[str] = Field(default_factory=list)
+    medications: list[str] = Field(default_factory=list)
+    allergies: list[str] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+    last_active_at: datetime
+
+
+class UserListResponse(BaseModel):
+    users: list[UserProfile]
+
+
+class UserCreateRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=128)
+    locale: str = "zh-CN"
+    region_code: str = "HK"
+    birth_year: str = ""
+    sex: str = ""
+    conditions: list[str] = Field(default_factory=list)
+    medications: list[str] = Field(default_factory=list)
+    allergies: list[str] = Field(default_factory=list)
+
+
+class UserUpdateRequest(BaseModel):
+    locale: str | None = None
+    region_code: str | None = None
+    birth_year: str | None = None
+    sex: str | None = None
+    conditions: list[str] | None = None
+    medications: list[str] | None = None
+    allergies: list[str] | None = None
+    mark_active: bool = False
+
+
+class UserGraphNode(BaseModel):
+    id: str
+    node_type: str
+    label: str
+    payload: dict = Field(default_factory=dict)
+    source: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class UserGraphEdge(BaseModel):
+    id: str
+    from_node_id: str
+    to_node_id: str
+    edge_type: str
+    payload: dict = Field(default_factory=dict)
+    created_at: datetime
+
+
+class GraphJourneyItem(BaseModel):
+    title: str
+    detail: str = ""
+    session_id: str = ""
+    is_current_session: bool = False
+    sort_time: datetime
+    severity_hint: RiskLevel | str = "low"
+
+
+class GraphRiskSignalItem(BaseModel):
+    label: str
+    risk_level: RiskLevel | str = "low"
+    session_id: str = ""
+    is_current_session: bool = False
+    is_active: bool = False
+    sort_time: datetime
+
+
+class GraphContextBundle(BaseModel):
+    persistent_features: dict[str, list[str]] = Field(default_factory=dict)
+    profile_highlights: list[str] = Field(default_factory=list)
+    recent_timeline: list[dict] = Field(default_factory=list)
+    recent_journey: list[GraphJourneyItem] = Field(default_factory=list)
+    risk_signals: list[GraphRiskSignalItem] = Field(default_factory=list)
+    summary_labels: list[str] = Field(default_factory=list)
+
+
+class UserGraphResponse(BaseModel):
+    user_id: str
+    nodes: list[UserGraphNode]
+    edges: list[UserGraphEdge]
+    summary_bundle: GraphContextBundle
+
+
+class UserDeleteResponse(BaseModel):
+    deleted: bool
+    user_id: str
+
+
+class LegacyUserProfileImport(BaseModel):
+    username: str = Field(min_length=1, max_length=128)
+    locale: str = "zh-CN"
+    region_code: str = "HK"
+    birth_year: str = ""
+    sex: str = ""
+    conditions: list[str] = Field(default_factory=list)
+    medications: list[str] = Field(default_factory=list)
+    allergies: list[str] = Field(default_factory=list)
+
+
+class LegacyImportRequest(BaseModel):
+    profiles: list[LegacyUserProfileImport] = Field(default_factory=list)
+    active_username: str | None = None

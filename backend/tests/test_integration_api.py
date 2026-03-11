@@ -47,6 +47,24 @@ def _mock_model_success(client):
     client.app.state.model_adapter.generate = fake_generate
 
 
+def _create_user(client, username="alice"):
+    response = client.post(
+        "/api/v1/users",
+        json={
+            "username": username,
+            "locale": "zh-CN",
+            "region_code": "HK",
+            "birth_year": "1990",
+            "sex": "女",
+            "conditions": ["哮喘"],
+            "medications": ["吸入剂"],
+            "allergies": ["青霉素"],
+        },
+    )
+    assert response.status_code == 200
+    return response.json()
+
+
 def test_chat_flow_and_session_history(client):
     _configure_model(client)
     _mock_model_success(client)
@@ -90,6 +108,92 @@ def test_chat_flow_and_session_history(client):
     messages = client.get(f"/api/v1/sessions/{session_id}/messages")
     assert messages.status_code == 200
     assert len(messages.json()["messages"]) == 4
+
+
+def test_user_crud_and_graph_flow(client):
+    user = _create_user(client, "graph-user")
+    assert user["conditions"] == ["哮喘"]
+
+    listed = client.get("/api/v1/users")
+    assert listed.status_code == 200
+    assert listed.json()["users"][0]["id"] == user["id"]
+
+    updated = client.patch(
+        f"/api/v1/users/{user['id']}",
+        json={"allergies": ["青霉素", "花粉"], "mark_active": True},
+    )
+    assert updated.status_code == 200
+    assert "花粉" in updated.json()["allergies"]
+
+    graph = client.get(f"/api/v1/users/{user['id']}/graph")
+    assert graph.status_code == 200
+    graph_data = graph.json()
+    assert graph_data["summary_bundle"]["persistent_features"]["conditions"] == ["哮喘"]
+    assert "HK" in graph_data["summary_bundle"]["profile_highlights"]
+    assert len(graph_data["nodes"]) >= 1
+
+
+def test_chat_with_user_id_writes_sessions_and_graph(client):
+    _configure_model(client)
+    _mock_model_success(client)
+    user = _create_user(client, "session-user")
+
+    response = client.post(
+        "/api/v1/chat",
+        json={
+            "user_id": user["id"],
+            "device_id": "device-session-user",
+            "locale": "zh-CN",
+            "region_code": "HK",
+            "message": "我今天发烧、咳嗽，晚上更明显",
+            "health_profile": {
+                "age_range": "出生年份: 1990",
+                "conditions": ["哮喘"],
+                "allergies": ["青霉素"],
+            },
+        },
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["meta"]["user_id"] == user["id"]
+
+    sessions = client.get(f"/api/v1/users/{user['id']}/sessions")
+    assert sessions.status_code == 200
+    assert len(sessions.json()["sessions"]) == 1
+    assert sessions.json()["sessions"][0]["user_id"] == user["id"]
+
+    graph = client.get(f"/api/v1/users/{user['id']}/graph")
+    assert graph.status_code == 200
+    graph_data = graph.json()
+    node_types = {node["node_type"] for node in graph_data["nodes"]}
+    assert "session" in node_types
+    assert "summary" in node_types
+    assert len(graph_data["summary_bundle"]["recent_journey"]) >= 1
+    assert graph_data["summary_bundle"]["recent_journey"][0]["is_current_session"] is True
+    assert isinstance(graph_data["summary_bundle"]["risk_signals"], list)
+
+
+def test_import_legacy_users_when_backend_empty(client):
+    imported = client.post(
+        "/api/v1/users/import-legacy",
+        json={
+            "profiles": [
+                {
+                    "username": "legacy-user",
+                    "locale": "zh-CN",
+                    "region_code": "HK",
+                    "birth_year": "1988",
+                    "sex": "男",
+                    "conditions": ["高血压"],
+                    "medications": ["氨氯地平"],
+                    "allergies": [],
+                }
+            ],
+            "active_username": "legacy-user",
+        },
+    )
+    assert imported.status_code == 200
+    assert imported.json()["users"][0]["username"] == "legacy-user"
 
 
 def test_model_config_setup_flow(client):

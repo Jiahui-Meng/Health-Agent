@@ -27,6 +27,7 @@ def test_build_user_prompt_contains_profile_and_context():
         profile=profile,
         long_summary="Recurring cough pattern",
         recent_messages=[{"role": "user", "content": "cough started on Monday"}],
+        graph_context={"persistent_features": {"conditions": ["asthma"]}},
         triage_stage="intake",
         triage_round_count=2,
         max_rounds=5,
@@ -37,6 +38,7 @@ def test_build_user_prompt_contains_profile_and_context():
     assert data["health_profile"]["conditions"] == ["asthma"]
     assert data["long_term_summary"] == "Recurring cough pattern"
     assert data["recent_messages"][0]["content"] == "cough started on Monday"
+    assert data["graph_context"]["persistent_features"]["conditions"] == ["asthma"]
     assert data["triage_stage"] == "intake"
     assert data["triage_round_count"] == 2
 
