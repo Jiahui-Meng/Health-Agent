@@ -1,159 +1,250 @@
 # Health Agent v1
 
-Health Agent is a health-focused AI agent inspired by openclaw's gateway/runtime pattern.
+Health Agent 是一个面向健康咨询与分诊的本地 AI Agent，默认使用 `Codex CLI + MCP tools`，并保留 `HTTP API` 作为回退模式。  
+当前项目已经支持本地多用户、长期会话持久化、health graph、医生式多轮问诊，以及用户级导出报告。
 
-It supports:
-- Free-text symptom input + structured health profile fields
-- Risk triage (`low|medium|high|emergency`) with strict safety rules
-- OpenAI Codex CLI login with built-in MCP tools (default) + HTTP API fallback
-- First-open model setup UI
-- Anonymous long-term local history (device-based, no login)
-- Session/message APIs for retrieval and deletion
+## How to Run / 如何运行
 
-## Stack
+推荐先选一条路径：
 
-- Frontend: React + Vite + TypeScript
-- Backend: FastAPI + SQLAlchemy
-- Database: Postgres
-- Deployment: Docker Compose
+- `Option A: Local Development`
+  适合本地开发和调试。建议后端先用 `SQLite`，启动最稳。
+- `Option B: Docker Compose`
+  适合体验默认完整部署。默认数据库是 `PostgreSQL`。
 
-## Quick Start (Docker)
+运行成功后你应该能访问：
 
-1. Optional envs:
+- Frontend: `http://localhost:5173`
+- Backend health: `http://localhost:8000/health`
 
-```bash
-export HEALTH_AGENT_PROVIDER_MODE="codex_cli"
-export HEALTH_AGENT_CODEX_CLI_BIN="codex"
-export HEALTH_AGENT_MCP_MODE="stdio"
-export HEALTH_AGENT_MODEL_BASE_URL="https://api.openai.com/v1"
-export HEALTH_AGENT_MODEL_NAME="gpt-5.4"
-```
-
-2. Start all services:
-
-```bash
-docker compose up --build
-```
-
-3. Open apps:
-- Frontend: http://localhost:5173
-- Backend health: http://localhost:8000/health
+如果前端右上角的设置按钮里能看到 Codex / MCP 状态，说明模型配置链路也正常。
 
 ## Local Development
 
-### Backend
+### 1. Backend
 
 ```bash
 cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+```
+
+本地直跑后端时，推荐先用 SQLite，避免默认的 Docker/Postgres 连接串导致 `postgres` 主机名解析失败：
+
+```bash
+HEALTH_AGENT_DATABASE_URL="sqlite:///./health_agent_dev.db" uvicorn app.main:app --reload --port 8000
+```
+
+如果你希望先把环境变量写进 `backend/.env`，可以至少放这行：
+
+```env
+HEALTH_AGENT_DATABASE_URL=sqlite:///./health_agent_dev.db
+```
+
+### 2. Frontend
+
+```bash
+cd frontend
+npm install
+```
+
+在 `frontend/.env` 中设置：
+
+```env
+VITE_API_BASE_URL=http://localhost:8000
+```
+
+然后启动前端：
+
+```bash
+npm run dev
+```
+
+### 3. Model Setup
+
+默认推荐 `Codex CLI`。
+
+先登录：
+
+```bash
 codex login
-uvicorn app.main:app --reload --port 8000
+codex login status
+```
+
+然后打开前端：
+
+- 首次进入会弹出模型配置
+- 默认 Provider 是 `Codex CLI`
+- 也可以切换到 `HTTP API`
+
+如果你只是本地开发，推荐这条路径：
+
+- `SQLite + 本地后端 + 本地前端 + Codex CLI`
+
+## Docker Compose
+
+如果你想直接体验默认完整部署：
+
+```bash
+docker compose up --build
+```
+
+默认行为：
+
+- Frontend 使用 `http://localhost:5173`
+- Backend 使用 `http://localhost:8000`
+- Database 使用 `PostgreSQL`
+
+启动完成后访问：
+
+- `http://localhost:5173`
+- `http://localhost:8000/health`
+
+如果你想体验项目默认部署而不是本地开发模式，推荐这条路径：
+
+- `Docker Compose + PostgreSQL + Codex CLI`
+
+## Model Setup
+
+当前项目支持两种模型接入方式：
+
+1. `Codex CLI (default)`
+- 使用 OpenAI 账号登录后的 `codex` CLI
+- 后端通过内建 `MCP server` 调用模型
+- 推荐用于本地开发和默认体验
+
+2. `HTTP API`
+- 适配 OpenAI 风格接口
+- 可手动填写 `Base URL / API Key / Model Name`
+- 适合作为回退路径
+
+默认相关配置可见于：
+
+- [backend/.env.example](/Users/kevin/Desktop/Health_Agent/backend/.env.example)
+- [backend/app/config.py](/Users/kevin/Desktop/Health_Agent/backend/app/config.py)
+
+默认值包括：
+
+- `HEALTH_AGENT_PROVIDER_MODE=codex_cli`
+- `HEALTH_AGENT_MODEL_BASE_URL=https://api.openai.com/v1`
+- `HEALTH_AGENT_MODEL_NAME=gpt-5.4`
+
+## Tests
+
+### Backend
+
+```bash
+cd backend
+source .venv/bin/activate
+pytest -q
 ```
 
 ### Frontend
 
 ```bash
 cd frontend
-npm install
-npm run dev
+npm run build
 ```
 
-Set API URL in `frontend/.env`:
+## API Overview
 
-```bash
-VITE_API_BASE_URL=http://localhost:8000
-```
+核心接口：
 
-## API
-
-### POST `/api/v1/chat`
-
-Request:
-
-```json
-{
-  "device_id": "device_xxx",
-  "locale": "zh-CN",
-  "region_code": "HK",
-  "message": "我胸痛并且呼吸困难",
-  "health_profile": {
-    "age_range": "30-39",
-    "sex": "female",
-    "conditions": ["asthma"],
-    "medications": ["inhaler"],
-    "allergies": ["penicillin"],
-    "pregnancy_status": "not pregnant"
-  },
-  "session_id": null
-}
-```
-
-### GET `/api/v1/sessions/{device_id}`
-Get sessions for an anonymous device.
-
-### GET `/api/v1/sessions/{session_id}/messages`
-Get all messages for a session.
-
-### DELETE `/api/v1/sessions/{session_id}`
-Delete one session and its messages.
-
-### GET `/api/v1/model-config/status`
-Returns runtime model config status:
-
-```json
-{
-  "configured": false,
-  "base_url": "https://api.openai.com/v1",
-  "model_name": "gpt-5.4",
-  "provider_mode": "codex_cli",
-  "oauth_cli_available": true,
-  "oauth_logged_in": false,
-  "oauth_status_message": "Codex CLI is not logged in.",
-  "oauth_account_id": null,
-  "mcp_available": true,
-  "mcp_status_message": "MCP server is ready."
-}
-```
-
-### POST `/api/v1/model-config`
-Set model config:
-
-```json
-{
-  "provider_mode": "http_api",
-  "base_url": "https://open.bigmodel.cn/api/paas/v4",
-  "api_key": "<your_token>",
-  "model_name": "glm-4.7-flash"
-}
-```
-
-Tip: if you provide an endpoint ending with `/chat/completions`, backend auto-normalizes to base URL.
-
-### OAuth APIs
-
+- `POST /api/v1/chat`
+- `GET /api/v1/users`
+- `POST /api/v1/users`
+- `PATCH /api/v1/users/{user_id}`
+- `GET /api/v1/users/{user_id}/sessions`
+- `GET /api/v1/users/{user_id}/graph`
+- `GET /api/v1/users/{user_id}/export?format=markdown`
+- `GET /api/v1/model-config/status`
+- `POST /api/v1/model-config`
 - `GET /api/v1/auth/oauth/status`
 - `POST /api/v1/auth/oauth/login/start`
 - `POST /api/v1/auth/oauth/logout`
 
-In `codex_cli` mode, the backend invokes `codex exec` with an internal stdio MCP server. The MCP tools expose session context, risk analysis, and response planning, while the FastAPI backend remains the source of truth for safety checks and persistence.
+聊天接口示例：
 
-## Safety Strategy (Strict)
-
-- Pre-routing emergency detection (CN + EN keywords)
-- No diagnosis and no prescription output policy
-- Emergency/high-risk guidance includes region-based emergency number
-- Post-generation guard rewrites unsafe output
-
-## Tests
-
-```bash
-cd backend
-pytest -q
+```json
+{
+  "user_id": "your-user-id",
+  "device_id": "device_local_user",
+  "locale": "zh-CN",
+  "region_code": "HK",
+  "message": "我今天发烧到38度，喉咙痛，还有点咳嗽",
+  "health_profile": {
+    "age_range": "出生年份: 1990",
+    "sex": "女",
+    "conditions": ["哮喘"],
+    "medications": ["吸入剂"],
+    "allergies": ["青霉素"]
+  }
+}
 ```
 
-```bash
-cd frontend
-npm run build
+## Stack
+
+- Frontend: React + Vite + TypeScript
+- Backend: FastAPI + SQLAlchemy
+- Database: PostgreSQL (default) / SQLite (local development supported)
+- Runtime: Codex CLI + MCP tools / HTTP API fallback
+- Deployment: Local dev or Docker Compose
+
+## Current Product Shape
+
+当前项目已经不是最初那种“匿名 device-only 临时聊天”形态，而是：
+
+- 本地多用户
+- 后端数据库持久化用户档案、会话和消息
+- 用户级 health graph
+- 3-5 轮医生式问诊
+- 最终阶段才输出结论与风险等级
+- 用户级 Markdown 导出报告
+
+## Safety Strategy
+
+- 急症关键词前置识别
+- 禁止诊断结论与处方指令
+- 急症场景直接分流
+- 多轮问诊后再给最终结论
+- 高风险输出保留区域化急救提示
+
+## 常见启动问题
+
+### 1. 本地直跑后端时报 `postgres` 主机名错误
+
+如果你看到类似：
+
+```text
+nodename nor servname provided, or not known
 ```
+
+通常说明你还在用 Docker 的默认 Postgres 连接串。  
+本地开发请改成 SQLite，例如：
+
+```bash
+HEALTH_AGENT_DATABASE_URL="sqlite:///./health_agent_dev.db" uvicorn app.main:app --reload --port 8000
+```
+
+### 2. Codex CLI 显示未登录
+
+先检查：
+
+```bash
+codex login status
+```
+
+如果未登录，执行：
+
+```bash
+codex login
+```
+
+### 3. 前端能打开，但不能聊天
+
+优先检查这三项：
+
+- Backend 是否在 `http://localhost:8000`
+- `frontend/.env` 是否配置了 `VITE_API_BASE_URL=http://localhost:8000`
+- 右上角模型配置按钮中，Codex / MCP 状态是否正常
