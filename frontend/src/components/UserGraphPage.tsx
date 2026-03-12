@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import ReactFlow, {
   Background,
   Controls,
+  Edge,
   Handle,
   MiniMap,
   NodeProps,
@@ -10,8 +11,8 @@ import ReactFlow, {
   ReactFlowProvider,
 } from 'reactflow'
 
-import { SessionItem, UserGraphResponse, UserProfile } from '../lib/api'
-import { GraphFilterState, GraphNodeData, buildGraphViewState } from '../lib/graphTree'
+import { AssociationAnalysisRow, SessionItem, UserGraphResponse, UserProfile } from '../lib/api'
+import { GraphEdgeData, GraphFilterState, GraphNodeData, buildGraphViewState } from '../lib/graphTree'
 
 type CopyText = {
   title: string
@@ -29,7 +30,21 @@ type CopyText = {
   riskAll: string
   riskHigh: string
   riskHideLow: string
+  inferredLinks: string
+  analysisLinks: string
+  runAnalysis: string
+  analyzing: string
   details: string
+  analysisTable: string
+  analysisEmpty: string
+  analysisModeDetails: string
+  analysisModeTable: string
+  analysisType: string
+  analysisConfidence: string
+  analysisEvidence: string
+  analysisSessions: string
+  detailTypeNode: string
+  detailTypeAssociation: string
   noSelection: string
   longTerm: string
   sessions: string
@@ -43,6 +58,9 @@ type Props = {
   currentSessionId?: string
   locale: string
   copy: CopyText
+  analysisRows: AssociationAnalysisRow[]
+  analyzingAssociations: boolean
+  onRunAssociationAnalysis: () => void
   onBack: () => void
 }
 
@@ -80,6 +98,9 @@ export default function UserGraphPage({
   currentSessionId,
   locale,
   copy,
+  analysisRows,
+  analyzingAssociations,
+  onRunAssociationAnalysis,
   onBack,
 }: Props) {
   const [filters, setFilters] = useState<GraphFilterState>({
@@ -95,9 +116,13 @@ export default function UserGraphPage({
     sessionMode: 'all',
     selectedSessionId: currentSessionId || sessions[0]?.id || '',
     riskMode: 'all',
+    showInferredLinks: false,
+    showAnalysisLinks: false,
   })
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
   const [selectedNodeId, setSelectedNodeId] = useState('')
+  const [selectedEdge, setSelectedEdge] = useState<Edge<GraphEdgeData> | null>(null)
+  const [panelMode, setPanelMode] = useState<'details' | 'analysis'>('details')
   const [flow, setFlow] = useState<ReactFlowInstance | null>(null)
 
   useEffect(() => {
@@ -136,10 +161,17 @@ export default function UserGraphPage({
     return () => window.clearTimeout(timer)
   }, [flow, graphState])
 
+  useEffect(() => {
+    if (!analyzingAssociations && analysisRows.length > 0) {
+      setPanelMode('analysis')
+    }
+  }, [analysisRows.length, analyzingAssociations])
+
   const selectedNode = graphState?.nodes.find((node) => node.id === selectedNodeId) || null
 
   const onNodeClick = useCallback(
     (_event: unknown, node: { id: string; data: GraphNodeData }) => {
+      setSelectedEdge(null)
       setSelectedNodeId(node.id)
       if (node.data.collapsible) {
         setExpandedIds((prev) => {
@@ -153,6 +185,11 @@ export default function UserGraphPage({
     [],
   )
 
+  const onEdgeClick = useCallback((_event: unknown, edge: Edge<GraphEdgeData>) => {
+    setSelectedNodeId('')
+    setSelectedEdge(edge)
+  }, [])
+
   const resetView = useCallback(() => {
     if (!graphState) return
     setExpandedIds(new Set(graphState.defaultExpandedIds))
@@ -160,6 +197,8 @@ export default function UserGraphPage({
       ...prev,
       sessionMode: 'all',
       riskMode: 'all',
+      showInferredLinks: false,
+      showAnalysisLinks: false,
       selectedSessionId: currentSessionId || sessions[0]?.id || '',
       nodeTypes: {
         session: true,
@@ -258,6 +297,25 @@ export default function UserGraphPage({
                 <option value="hide-low">{copy.riskHideLow}</option>
               </select>
             </label>
+            <label className="graph-inline-toggle">
+              <input
+                type="checkbox"
+                checked={filters.showInferredLinks}
+                onChange={(e) => setFilters((prev) => ({ ...prev, showInferredLinks: e.target.checked }))}
+              />
+              <span>{copy.inferredLinks}</span>
+            </label>
+            <label className="graph-inline-toggle">
+              <input
+                type="checkbox"
+                checked={filters.showAnalysisLinks}
+                onChange={(e) => setFilters((prev) => ({ ...prev, showAnalysisLinks: e.target.checked }))}
+              />
+              <span>{copy.analysisLinks}</span>
+            </label>
+            <button type="button" onClick={onRunAssociationAnalysis} disabled={analyzingAssociations}>
+              {analyzingAssociations ? copy.analyzing : copy.runAnalysis}
+            </button>
           </section>
 
           <section className="graph-filter-card">
@@ -288,6 +346,7 @@ export default function UserGraphPage({
               nodes={graphState?.nodes || []}
               edges={graphState?.edges || []}
               onNodeClick={onNodeClick}
+              onEdgeClick={onEdgeClick}
               onInit={setFlow}
               nodeTypes={{ healthTreeNode: HealthTreeNode }}
               fitView
@@ -304,8 +363,83 @@ export default function UserGraphPage({
         </div>
 
         <aside className="graph-detail-panel">
-          <h3>{copy.details}</h3>
-          {selectedNode ? (
+          <div className="graph-detail-header">
+            <h3>{panelMode === 'analysis' ? copy.analysisTable : copy.details}</h3>
+            <div className="graph-detail-tabs">
+              <button type="button" className={panelMode === 'details' ? 'is-active' : ''} onClick={() => setPanelMode('details')}>
+                {copy.analysisModeDetails}
+              </button>
+              <button type="button" className={panelMode === 'analysis' ? 'is-active' : ''} onClick={() => setPanelMode('analysis')}>
+                {copy.analysisModeTable}
+              </button>
+            </div>
+          </div>
+          {panelMode === 'analysis' ? (
+            analysisRows.length > 0 ? (
+              <div className="graph-analysis-table">
+                {analysisRows.map((row, index) => (
+                  <article key={`${row.from_ref}-${row.to_ref}-${index}`} className="graph-analysis-row">
+                    <strong>{row.from_ref} → {row.to_ref}</strong>
+                    <dl>
+                      <div>
+                        <dt>{copy.analysisType}</dt>
+                        <dd>{row.association_type}</dd>
+                      </div>
+                      <div>
+                        <dt>{copy.analysisConfidence}</dt>
+                        <dd>{row.confidence}</dd>
+                      </div>
+                      <div>
+                        <dt>{copy.analysisSessions}</dt>
+                        <dd>{row.source_session_ids.join(', ') || '-'}</dd>
+                      </div>
+                    </dl>
+                    <p>
+                      <span>{copy.analysisEvidence}: </span>
+                      {row.evidence_summary}
+                    </p>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <p>{copy.analysisEmpty}</p>
+            )
+          ) : selectedEdge?.data?.kind === 'association' ? (
+            <div className="graph-detail-card">
+              <strong>{selectedEdge.data.title}</strong>
+              <dl>
+                <div>
+                  <dt>Type</dt>
+                  <dd>{copy.detailTypeAssociation}</dd>
+                </div>
+                {selectedEdge.data.edgeType && (
+                  <div>
+                    <dt>Edge</dt>
+                    <dd>{selectedEdge.data.edgeType}</dd>
+                  </div>
+                )}
+                {selectedEdge.data.confidence && (
+                  <div>
+                    <dt>Confidence</dt>
+                    <dd>{selectedEdge.data.confidence}</dd>
+                  </div>
+                )}
+                {selectedEdge.data.evidenceType && (
+                  <div>
+                    <dt>Source</dt>
+                    <dd>{selectedEdge.data.evidenceType}</dd>
+                  </div>
+                )}
+                {selectedEdge.data.sourceSessionIds && selectedEdge.data.sourceSessionIds.length > 0 && (
+                  <div>
+                    <dt>Sessions</dt>
+                    <dd>{selectedEdge.data.sourceSessionIds.join(', ')}</dd>
+                  </div>
+                )}
+              </dl>
+              <pre>{selectedEdge.data.evidenceSummary || ''}</pre>
+            </div>
+          ) : selectedNode ? (
             <div className="graph-detail-card">
               <strong>{selectedNode.data.title}</strong>
               {selectedNode.data.subtitle && <p>{selectedNode.data.subtitle}</p>}
@@ -313,7 +447,7 @@ export default function UserGraphPage({
               <dl>
                 <div>
                   <dt>Kind</dt>
-                  <dd>{selectedNode.data.kind}</dd>
+                  <dd>{copy.detailTypeNode}: {selectedNode.data.kind}</dd>
                 </div>
                 {selectedNode.data.sessionId && (
                   <div>

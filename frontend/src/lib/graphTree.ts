@@ -26,6 +26,8 @@ export type GraphFilterState = {
   sessionMode: 'all' | 'current' | 'selected'
   selectedSessionId: string
   riskMode: 'all' | 'high-emergency' | 'hide-low'
+  showInferredLinks: boolean
+  showAnalysisLinks: boolean
 }
 
 export type GraphNodeData = {
@@ -42,15 +44,35 @@ export type GraphNodeData = {
   meta?: string
 }
 
+export type GraphEdgeData = {
+  kind: 'tree' | 'association'
+  title?: string
+  edgeType?: string
+  confidence?: string
+  evidenceType?: string
+  evidenceSummary?: string
+  sourceSessionIds?: string[]
+}
+
 export type GraphViewState = {
   nodes: Array<Node<GraphNodeData>>
-  edges: Edge[]
+  edges: Array<Edge<GraphEdgeData>>
   defaultExpandedIds: string[]
 }
 
 const SESSION_GROUP_ID = 'graph-group-sessions'
 const LONGTERM_GROUP_ID = 'graph-group-longterm'
 const DEFAULT_SESSION_LIMIT = 5
+const ASSOCIATION_EDGE_TYPES = new Set([
+  'POSSIBLY_RELATED_TO',
+  'POSSIBLY_EXPLAINED_BY',
+  'POSSIBLY_RECURRENT_WITH',
+  'POSSIBLY_CYCLE_RELATED',
+  'MODEL_POSSIBLY_RELATED_TO',
+  'MODEL_POSSIBLY_EXPLAINED_BY',
+  'MODEL_POSSIBLY_RECURRENT_WITH',
+  'MODEL_POSSIBLY_PATTERN_LINKED',
+])
 
 type TreeItem = {
   id: string
@@ -188,7 +210,7 @@ export function buildGraphViewState(params: {
     }
   }
 
-  const edges: Edge[] = treeItems
+  const edges: Array<Edge<GraphEdgeData>> = treeItems
     .filter((item) => item.parentId)
     .map((item) => ({
       id: `${item.parentId}-${item.id}`,
@@ -196,9 +218,82 @@ export function buildGraphViewState(params: {
       target: item.id,
       type: 'smoothstep',
       animated: item.data.kind === 'risk_signal' && ['high', 'emergency'].includes(item.data.badgeTone || ''),
+      data: { kind: 'tree' },
     }))
 
   const positioned = layoutTree(treeItems, edges)
+  const visibleNodeIds = new Set(positioned.map((node) => node.id))
+  if (filters.showInferredLinks) {
+    for (const edge of userGraph.edges) {
+      if (!ASSOCIATION_EDGE_TYPES.has(edge.edge_type)) continue
+      if (edge.edge_type.startsWith('MODEL_')) continue
+      if (!visibleNodeIds.has(edge.from_node_id) || !visibleNodeIds.has(edge.to_node_id)) continue
+      const confidence = String(edge.payload?.confidence || 'low')
+      edges.push({
+        id: edge.id,
+        source: edge.from_node_id,
+        target: edge.to_node_id,
+        type: 'smoothstep',
+        animated: confidence === 'high',
+        style: {
+          strokeDasharray: confidence === 'high' ? '7 4' : '4 5',
+          strokeWidth: confidence === 'high' ? 2.2 : confidence === 'medium' ? 1.8 : 1.4,
+          stroke:
+            confidence === 'high'
+              ? 'rgba(180, 69, 32, 0.92)'
+              : confidence === 'medium'
+                ? 'rgba(210, 125, 52, 0.82)'
+                : 'rgba(78, 99, 122, 0.72)',
+        },
+        data: {
+          kind: 'association',
+          title: associationLabel(edge.edge_type, locale),
+          edgeType: edge.edge_type,
+          confidence,
+          evidenceType: String(edge.payload?.evidence_type || ''),
+          evidenceSummary: String(edge.payload?.evidence_summary || ''),
+          sourceSessionIds: Array.isArray(edge.payload?.source_session_ids)
+            ? edge.payload.source_session_ids.map((item) => String(item))
+            : [],
+        },
+      })
+    }
+  }
+  if (filters.showAnalysisLinks) {
+    for (const edge of userGraph.edges) {
+      if (!edge.edge_type.startsWith('MODEL_')) continue
+      if (!visibleNodeIds.has(edge.from_node_id) || !visibleNodeIds.has(edge.to_node_id)) continue
+      const confidence = String(edge.payload?.confidence || 'low')
+      edges.push({
+        id: edge.id,
+        source: edge.from_node_id,
+        target: edge.to_node_id,
+        type: 'smoothstep',
+        animated: confidence === 'high',
+        style: {
+          strokeDasharray: confidence === 'high' ? '11 5' : '8 6',
+          strokeWidth: confidence === 'high' ? 2.8 : confidence === 'medium' ? 2.2 : 1.8,
+          stroke:
+            confidence === 'high'
+              ? 'rgba(118, 37, 140, 0.88)'
+              : confidence === 'medium'
+                ? 'rgba(108, 76, 173, 0.8)'
+                : 'rgba(112, 106, 168, 0.68)',
+        },
+        data: {
+          kind: 'association',
+          title: analysisAssociationLabel(edge.edge_type, locale),
+          edgeType: edge.edge_type,
+          confidence,
+          evidenceType: String(edge.payload?.evidence_type || ''),
+          evidenceSummary: String(edge.payload?.evidence_summary || ''),
+          sourceSessionIds: Array.isArray(edge.payload?.source_session_ids)
+            ? edge.payload.source_session_ids.map((item) => String(item))
+            : [],
+        },
+      })
+    }
+  }
   return {
     nodes: positioned.map((node) => ({
       ...node,
@@ -356,10 +451,43 @@ function sessionLabel(sessionId: string, locale: string) {
   return locale.startsWith('zh') ? `会话 ${sessionId.slice(0, 8)}` : `Session ${sessionId.slice(0, 8)}`
 }
 
-function layoutTree(treeItems: TreeItem[], edges: Edge[]) {
+function associationLabel(edgeType: string, locale: string) {
+  const zh: Record<string, string> = {
+    POSSIBLY_RELATED_TO: '可能相关',
+    POSSIBLY_EXPLAINED_BY: '可能由既往特征解释',
+    POSSIBLY_RECURRENT_WITH: '可能为复发/持续',
+    POSSIBLY_CYCLE_RELATED: '可能与周期相关',
+  }
+  const en: Record<string, string> = {
+    POSSIBLY_RELATED_TO: 'Possible Association',
+    POSSIBLY_EXPLAINED_BY: 'Possibly Explained By Trait',
+    POSSIBLY_RECURRENT_WITH: 'Possible Recurrence',
+    POSSIBLY_CYCLE_RELATED: 'Possible Cycle Relation',
+  }
+  return locale.startsWith('zh') ? zh[edgeType] || edgeType : en[edgeType] || edgeType
+}
+
+function analysisAssociationLabel(edgeType: string, locale: string) {
+  const zh: Record<string, string> = {
+    MODEL_POSSIBLY_RELATED_TO: '模型分析：可能相关',
+    MODEL_POSSIBLY_EXPLAINED_BY: '模型分析：可能由既往特征解释',
+    MODEL_POSSIBLY_RECURRENT_WITH: '模型分析：可能为复发/持续',
+    MODEL_POSSIBLY_PATTERN_LINKED: '模型分析：可能存在模式关联',
+  }
+  const en: Record<string, string> = {
+    MODEL_POSSIBLY_RELATED_TO: 'Model Analysis: Possible Association',
+    MODEL_POSSIBLY_EXPLAINED_BY: 'Model Analysis: Possibly Explained By Trait',
+    MODEL_POSSIBLY_RECURRENT_WITH: 'Model Analysis: Possible Recurrence',
+    MODEL_POSSIBLY_PATTERN_LINKED: 'Model Analysis: Possible Pattern Link',
+  }
+  return locale.startsWith('zh') ? zh[edgeType] || edgeType : en[edgeType] || edgeType
+}
+
+function layoutTree(treeItems: TreeItem[], edges: Array<Edge<GraphEdgeData>>) {
   const childrenMap = new Map<string, string[]>()
   const itemMap = new Map(treeItems.map((item) => [item.id, item]))
   for (const edge of edges) {
+    if (edge.data?.kind === 'association') continue
     const current = childrenMap.get(edge.source) || []
     current.push(edge.target)
     childrenMap.set(edge.source, current)

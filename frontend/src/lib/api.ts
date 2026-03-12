@@ -142,6 +142,22 @@ export type UserGraphResponse = {
   summary_bundle: GraphSummaryBundle
 }
 
+export type AssociationAnalysisRow = {
+  from_ref: string
+  to_ref: string
+  association_type: string
+  confidence: string
+  evidence_summary: string
+  source_session_ids: string[]
+}
+
+export type AssociationAnalysisResponse = {
+  ok: boolean
+  rows: AssociationAnalysisRow[]
+  written_edges_count: number
+  analyzed_at: string
+}
+
 export type LegacyImportRequest = {
   profiles: UserCreateRequest[]
   active_username?: string
@@ -291,6 +307,12 @@ export async function deleteUser(userId: string): Promise<{ deleted: boolean; us
 
 export async function getUserGraph(userId: string): Promise<UserGraphResponse> {
   return callApi<UserGraphResponse>(`/api/v1/users/${userId}/graph`)
+}
+
+export async function runAssociationAnalysis(userId: string): Promise<AssociationAnalysisResponse> {
+  return callApi<AssociationAnalysisResponse>(`/api/v1/users/${userId}/association-analysis`, {
+    method: 'POST',
+  })
 }
 
 export async function importLegacyUsers(payload: LegacyImportRequest): Promise<{ users: UserProfile[] }> {

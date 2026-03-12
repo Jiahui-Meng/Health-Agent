@@ -14,6 +14,8 @@ from .config import Settings, get_settings
 from .database import Base, build_session_factory, create_engine_for_url, get_db_session
 from .models import MessageRecord, RuntimeConfig, SessionRecord, UserRecord
 from .schemas import (
+    AssociationAnalysisResponse,
+    AssociationAnalysisRow,
     ChatAnswer,
     ChatMeta,
     ChatRequest,
@@ -42,6 +44,13 @@ from .services.context_builder import build_context
 from .services.model_adapter import ModelAdapter, ModelAPIError, ModelResult, normalize_model_base_url
 from .services.codex_cli import CodexCliError, CodexCliService
 from .services.advice_builder import advice_sections_to_next_steps, build_advice_sections
+from .services.association_builder import rebuild_association_edges
+from .services.association_analysis import (
+    ANALYSIS_EDGE_TYPE_MAP,
+    build_association_analysis_context,
+    build_association_analysis_messages,
+    parse_association_analysis_rows,
+)
 from .services.graph_service import (
     create_or_update_user,
     delete_session_graph_subtree,
@@ -50,6 +59,7 @@ from .services.graph_service import (
     mark_user_active,
     upsert_session_graph,
 )
+from .services.association_builder import replace_model_analysis_edges
 from .services.output_parser import parse_model_json
 from .services.prompt_builder import build_codex_mcp_prompt, build_system_prompt, build_user_prompt
 from .services.export_report import build_export_context, build_export_report_messages, compose_full_markdown_report
@@ -271,6 +281,96 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             .all()
         )
         return SessionListResponse(sessions=[_serialize_session_item(session) for session in sessions])
+
+    @app.post(f"{app_settings.api_prefix}/users/{{user_id}}/association-analysis", response_model=AssociationAnalysisResponse)
+    def run_user_association_analysis(user_id: str, db: Session = Depends(db_dependency)) -> AssociationAnalysisResponse:
+        user = db.get(UserRecord, user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        sessions = (
+            db.execute(
+                select(SessionRecord)
+                .where(SessionRecord.user_id == user_id)
+                .order_by(SessionRecord.created_at.asc(), SessionRecord.updated_at.asc())
+            )
+            .scalars()
+            .all()
+        )
+        session_ids = [session.id for session in sessions]
+        messages = (
+            db.execute(
+                select(MessageRecord)
+                .where(MessageRecord.session_id.in_(session_ids))
+                .order_by(MessageRecord.created_at.asc(), MessageRecord.id.asc())
+            )
+            .scalars()
+            .all()
+            if session_ids
+            else []
+        )
+        graph_payload = get_graph_payload(db, user_id)
+        context = build_association_analysis_context(
+            user=user,
+            sessions=sessions,
+            messages=messages,
+            graph_payload=graph_payload,
+        )
+        runtime_config = _ensure_runtime_config_row(db, app_settings)
+        analysis_messages = build_association_analysis_messages(user.locale, context)
+        try:
+            model_result = _generate_report_result(
+                runtime_config=runtime_config,
+                codex_cli_service=app.state.codex_cli_service,
+                model_adapter=app.state.model_adapter,
+                messages=analysis_messages,
+                locale=user.locale,
+            )
+        except (ModelAPIError, CodexCliError) as exc:
+            raise HTTPException(
+                status_code=getattr(exc, "status_code", 502),
+                detail={
+                    "message": str(exc),
+                    "hint": "Please verify current model configuration before running association analysis.",
+                },
+            ) from exc
+
+        try:
+            rows = parse_association_analysis_rows(
+                model_result.content,
+                valid_node_ids=set(context["allowed_refs"]),
+                valid_session_ids=set(context["allowed_session_ids"]),
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "message": f"Association analysis response was invalid: {exc}",
+                    "hint": "Please retry or adjust the current model/provider configuration.",
+                },
+            ) from exc
+
+        analyzed_at = datetime.utcnow()
+        stored_rows = [
+            {
+                **row,
+                "edge_type": ANALYSIS_EDGE_TYPE_MAP[row["association_type"]],
+            }
+            for row in rows
+        ]
+        replace_model_analysis_edges(
+            db,
+            user_id,
+            rows=stored_rows,
+            analyzed_at=analyzed_at.isoformat(),
+        )
+        db.commit()
+        return AssociationAnalysisResponse(
+            ok=True,
+            rows=[AssociationAnalysisRow(**row) for row in rows],
+            written_edges_count=len(stored_rows),
+            analyzed_at=analyzed_at,
+        )
 
     @app.get(f"{app_settings.api_prefix}/users/{{user_id}}/export")
     def export_user_markdown(user_id: str, format: str = "markdown", db: Session = Depends(db_dependency)) -> PlainTextResponse:
@@ -626,6 +726,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 locale=payload.locale,
                 risk_triggers=initial_risk.triggers,
             )
+            rebuild_association_edges(
+                db,
+                user_record.id,
+                locale=payload.locale,
+                current_session_id=session_record.id,
+                enhancer=(
+                    lambda prompt: _generate_report_result(
+                        runtime_config=runtime_config,
+                        codex_cli_service=app.state.codex_cli_service,
+                        model_adapter=app.state.model_adapter,
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You refine rule-based health graph association candidates. "
+                                    "Only revise candidate confidence and evidence summaries. "
+                                    "Do not add new candidates and do not state diagnoses."
+                                ),
+                            },
+                            {"role": "user", "content": prompt},
+                        ],
+                        locale=payload.locale,
+                    ).content
+                )
+                if answer.get("stage") == "conclusion"
+                else None,
+            )
 
         db.commit()
 
@@ -688,9 +815,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not session_record:
             raise HTTPException(status_code=404, detail="Session not found")
 
-        if session_record.user_id:
-            delete_session_graph_subtree(db, session_record.user_id, session_record.id)
+        user_id = session_record.user_id
         db.delete(session_record)
+        db.flush()
+        if user_id:
+            delete_session_graph_subtree(db, user_id, session_id)
         db.commit()
         return {"deleted": True, "session_id": session_id}
 

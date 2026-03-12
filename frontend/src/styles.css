@@ -645,9 +645,86 @@ button:disabled {
   margin: 0;
 }
 
+.graph-inline-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.86rem;
+  color: #27453d;
+}
+
+.graph-inline-toggle input {
+  margin: 0;
+}
+
 .graph-detail-card {
   display: grid;
   gap: 10px;
+}
+
+.graph-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.graph-detail-tabs {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.graph-detail-tabs button {
+  border: 1px solid #d4e2dc;
+  background: #fff;
+  color: #27453d;
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 0.78rem;
+}
+
+.graph-detail-tabs button.is-active {
+  background: #10342d;
+  color: #fff;
+  border-color: #10342d;
+}
+
+.graph-analysis-table {
+  display: grid;
+  gap: 10px;
+}
+
+.graph-analysis-row {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #d7e4de;
+  border-radius: 12px;
+  padding: 12px;
+  background: #fbfdfc;
+}
+
+.graph-analysis-row dl {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.graph-analysis-row dl div {
+  display: grid;
+  gap: 2px;
+}
+
+.graph-analysis-row dt {
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  color: #5f766d;
+  font-weight: 700;
+}
+
+.graph-analysis-row dd,
+.graph-analysis-row p {
+  margin: 0;
+  font-size: 0.86rem;
 }
 
 .graph-detail-card p,

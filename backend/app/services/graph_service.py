@@ -4,12 +4,13 @@ from dataclasses import dataclass
 from datetime import datetime
 import json
 import re
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy import delete, desc, select
 from sqlalchemy.orm import Session
 
 from ..models import MessageRecord, SessionRecord, UserGraphEdgeRecord, UserGraphNodeRecord, UserRecord
+from .association_builder import prune_invalid_association_edges, rebuild_association_edges
 
 PERSISTENT_NODE_TYPES = {
     "condition": "HAS_CONDITION",
@@ -24,7 +25,7 @@ SYMPTOM_PATTERNS = [
     ("胸痛", r"胸痛|chest pain"),
     ("呼吸困难", r"呼吸困难|气短|shortness of breath|breathing trouble"),
     ("头痛", r"头痛|headache"),
-    ("腹痛", r"腹痛|肚子痛|abdominal pain|stomach pain"),
+    ("腹痛", r"腹痛|肚子痛|肚子.*疼|abdominal pain|stomach pain"),
     ("流鼻涕", r"流鼻涕|鼻塞|runny nose|nasal congestion"),
     ("恶心", r"恶心|nausea"),
     ("呕吐", r"呕吐|vomit|vomiting"),
@@ -193,6 +194,16 @@ def get_graph_payload(db: Session, user_id: str) -> dict[str, Any]:
         .scalars()
         .all()
     )
+    prune_invalid_association_edges(db, user_id, valid_node_ids, session_ids)
+    edges = (
+        db.execute(
+            select(UserGraphEdgeRecord)
+            .where(UserGraphEdgeRecord.user_id == user_id)
+            .order_by(UserGraphEdgeRecord.created_at.asc())
+        )
+        .scalars()
+        .all()
+    )
     edges = [edge for edge in edges if edge.from_node_id in valid_node_ids and edge.to_node_id in valid_node_ids]
     bundle = get_graph_bundle(db, user_id)
     return {
@@ -302,7 +313,12 @@ def upsert_session_graph(
         _ensure_edge(db, user.id, session_node.id, summary_node.id, "SUMMARIZED_AS")
 
 
-def reconcile_user_graph_from_sessions(db: Session, user_id: str) -> None:
+def reconcile_user_graph_from_sessions(
+    db: Session,
+    user_id: str,
+    *,
+    association_enhancer: Callable[[str], str] | None = None,
+) -> None:
     user = db.get(UserRecord, user_id)
     if not user:
         return
@@ -316,6 +332,13 @@ def reconcile_user_graph_from_sessions(db: Session, user_id: str) -> None:
     for session in sessions:
         rebuild_session_graph_from_history(db, user_id, session.id, root_node_id=root_node.id)
     _prune_orphan_symptom_nodes(db, user_id)
+    rebuild_association_edges(
+        db,
+        user_id,
+        locale=user.locale,
+        current_session_id=sessions[-1].id if sessions else None,
+        enhancer=association_enhancer,
+    )
     db.flush()
 
 
@@ -439,10 +462,7 @@ def _delete_session_derived_nodes(db: Session, user_id: str, session_id: str) ->
     removable_ids = {
         node.id
         for node in nodes
-        if (
-            node.node_type == "session" and node.label == session_id
-        )
-        or str((node.payload or {}).get("session_id") or "") == session_id
+        if node.node_type != "session" and str((node.payload or {}).get("session_id") or "") == session_id
     }
     if not removable_ids:
         return
@@ -483,6 +503,9 @@ def delete_session_graph_subtree(db: Session, user_id: str, session_id: str) -> 
         db.execute(delete(UserGraphNodeRecord).where(UserGraphNodeRecord.id.in_(removable_ids)))
         db.flush()
     _prune_orphan_symptom_nodes(db, user_id)
+    user = db.get(UserRecord, user_id)
+    if user:
+        rebuild_association_edges(db, user_id, locale=user.locale)
 
 
 def _ensure_user_root_node(db: Session, user: UserRecord) -> UserGraphNodeRecord:

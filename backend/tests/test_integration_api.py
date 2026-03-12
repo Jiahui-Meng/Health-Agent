@@ -1,4 +1,5 @@
 import json
+import re
 from types import SimpleNamespace
 
 from app.services.model_adapter import ModelAPIError, ModelResult
@@ -699,6 +700,287 @@ def test_graph_reconcile_backfills_history_for_existing_sessions(client):
     assert any(node["node_type"] == "session" and node["label"] == session_id for node in payload["nodes"])
     assert len(payload["summary_bundle"]["recent_journey"]) >= 1
     assert len(payload["summary_bundle"]["risk_signals"]) >= 1
+
+
+def test_graph_builds_condition_to_session_association_edges(client):
+    _configure_model(client)
+    _mock_model_success(client)
+    response = client.post(
+        "/api/v1/users",
+        json={
+            "username": "association-heart-user",
+            "locale": "zh-CN",
+            "region_code": "HK",
+            "birth_year": "1992",
+            "sex": "男",
+            "conditions": ["先天性心脏病"],
+            "medications": [],
+            "allergies": [],
+        },
+    )
+    assert response.status_code == 200
+    user = response.json()
+
+    chat = client.post(
+        "/api/v1/chat",
+        json={
+            "user_id": user["id"],
+            "device_id": "device-association-heart-user",
+            "locale": "zh-CN",
+            "region_code": "HK",
+            "message": "我这两天胸痛，而且会气短。",
+        },
+    )
+    assert chat.status_code == 200
+
+    graph = client.get(f"/api/v1/users/{user['id']}/graph")
+    assert graph.status_code == 200
+    association_edges = [
+        edge
+        for edge in graph.json()["edges"]
+        if edge["edge_type"] in {"POSSIBLY_RELATED_TO", "POSSIBLY_EXPLAINED_BY"}
+    ]
+    assert association_edges
+    assert any("condition:cardiac" in edge["payload"].get("rule_keys", []) for edge in association_edges)
+    assert any(edge["payload"].get("confidence") in {"medium", "high"} for edge in association_edges)
+
+
+def test_graph_builds_cycle_association_for_female_only(client):
+    _configure_model(client)
+    _mock_model_success(client)
+
+    female = _create_user(client, "female-cycle-user")
+    first = client.post(
+        "/api/v1/chat",
+        json={
+            "user_id": female["id"],
+            "device_id": "device-female-cycle-user-1",
+            "locale": "zh-CN",
+            "region_code": "HK",
+            "message": "上个月肚子疼，这个月来月经前还是肚子疼。",
+        },
+    )
+    assert first.status_code == 200
+    second = client.post(
+        "/api/v1/chat",
+        json={
+            "user_id": female["id"],
+            "device_id": "device-female-cycle-user-2",
+            "locale": "zh-CN",
+            "region_code": "HK",
+            "message": "这个月肚子还是疼，和生理期差不多同时出现。",
+        },
+    )
+    assert second.status_code == 200
+
+    female_graph = client.get(f"/api/v1/users/{female['id']}/graph")
+    assert female_graph.status_code == 200
+    female_cycle_edges = [
+        edge for edge in female_graph.json()["edges"] if edge["edge_type"] == "POSSIBLY_CYCLE_RELATED"
+    ]
+    assert female_cycle_edges
+
+    male_response = client.post(
+        "/api/v1/users",
+        json={
+            "username": "male-cycle-user",
+            "locale": "zh-CN",
+            "region_code": "HK",
+            "birth_year": "1991",
+            "sex": "男",
+            "conditions": [],
+            "medications": [],
+            "allergies": [],
+        },
+    )
+    assert male_response.status_code == 200
+    male = male_response.json()
+    client.post(
+        "/api/v1/chat",
+        json={
+            "user_id": male["id"],
+            "device_id": "device-male-cycle-user-1",
+            "locale": "zh-CN",
+            "region_code": "HK",
+            "message": "上个月肚子疼，这个月还是肚子疼。",
+        },
+    )
+    client.post(
+        "/api/v1/chat",
+        json={
+            "user_id": male["id"],
+            "device_id": "device-male-cycle-user-2",
+            "locale": "zh-CN",
+            "region_code": "HK",
+            "message": "这个月肚子还是疼，和上个月差不多。",
+        },
+    )
+    male_graph = client.get(f"/api/v1/users/{male['id']}/graph")
+    assert male_graph.status_code == 200
+    assert not any(edge["edge_type"] == "POSSIBLY_CYCLE_RELATED" for edge in male_graph.json()["edges"])
+
+
+def test_delete_session_removes_association_edges(client):
+    _configure_model(client)
+    _mock_model_success(client)
+    user = _create_user(client, "delete-association-user")
+
+    first = client.post(
+        "/api/v1/chat",
+        json={
+            "user_id": user["id"],
+            "device_id": "device-delete-association-1",
+            "locale": "zh-CN",
+            "region_code": "HK",
+            "message": "上个月肚子疼，这个月来月经前还是肚子疼。",
+        },
+    )
+    second = client.post(
+        "/api/v1/chat",
+        json={
+            "user_id": user["id"],
+            "device_id": "device-delete-association-2",
+            "locale": "zh-CN",
+            "region_code": "HK",
+            "message": "这个月肚子还是疼，和生理期差不多同时出现。",
+        },
+    )
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_session_id = first.json()["meta"]["session_id"]
+
+    graph_before = client.get(f"/api/v1/users/{user['id']}/graph")
+    assert graph_before.status_code == 200
+    assert any(edge["edge_type"] == "POSSIBLY_CYCLE_RELATED" for edge in graph_before.json()["edges"])
+
+    deleted = client.delete(f"/api/v1/sessions/{first_session_id}")
+    assert deleted.status_code == 200
+
+    graph_after = client.get(f"/api/v1/users/{user['id']}/graph")
+    assert graph_after.status_code == 200
+    assert all(
+        first_session_id not in edge["payload"].get("source_session_ids", [])
+        for edge in graph_after.json()["edges"]
+        if edge["edge_type"].startswith("POSSIBLY_")
+    )
+
+
+def test_run_association_analysis_writes_model_edges(client):
+    _configure_model(client)
+    _mock_model_success(client)
+    user = _create_user(client, "analysis-user")
+
+    chat = client.post(
+        "/api/v1/chat",
+        json={
+            "user_id": user["id"],
+            "device_id": "device-analysis-user",
+            "locale": "zh-CN",
+            "region_code": "HK",
+            "message": "我最近胸痛，而且容易气短。",
+        },
+    )
+    assert chat.status_code == 200
+    session_id = chat.json()["meta"]["session_id"]
+    def analysis_generate_text(messages, locale):
+        del locale
+        prompt = "\n".join(message["content"] for message in messages)
+        assert session_id in prompt
+        context = json.loads(re.search(r"\{.*\}", messages[-1]["content"], flags=re.DOTALL).group(0))
+        condition_node_id = next(node["id"] for node in context["graph"]["nodes"] if node["node_type"] == "condition")
+        session_node_id = next(
+            node["id"] for node in context["graph"]["nodes"] if node["node_type"] == "session" and node["label"] == session_id
+        )
+        return ModelResult(
+            content=json.dumps(
+                {
+                    "rows": [
+                        {
+                            "from_ref": condition_node_id,
+                            "to_ref": session_node_id,
+                            "association_type": "possibly_explained_by",
+                            "confidence": "high",
+                            "evidence_summary": "先天性心脏病与当前胸痛、气短在同一会话中再次出现，值得重点关联。",
+                            "source_session_ids": [session_id],
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            model=HTTP_MODEL_NAME,
+        )
+
+    client.app.state.model_adapter.generate_text = analysis_generate_text
+
+    response = client.post(f"/api/v1/users/{user['id']}/association-analysis")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert data["written_edges_count"] == 1
+    assert data["rows"][0]["association_type"] == "possibly_explained_by"
+
+    graph = client.get(f"/api/v1/users/{user['id']}/graph")
+    assert graph.status_code == 200
+    assert any(edge["edge_type"] == "MODEL_POSSIBLY_EXPLAINED_BY" for edge in graph.json()["edges"])
+
+
+def test_delete_session_removes_model_analysis_edges(client):
+    _configure_model(client)
+    _mock_model_success(client)
+    user = _create_user(client, "analysis-delete-user")
+
+    chat = client.post(
+        "/api/v1/chat",
+        json={
+            "user_id": user["id"],
+            "device_id": "device-analysis-delete-user",
+            "locale": "zh-CN",
+            "region_code": "HK",
+            "message": "我最近胸痛，而且容易气短。",
+        },
+    )
+    assert chat.status_code == 200
+    session_id = chat.json()["meta"]["session_id"]
+    def analysis_generate_text(messages, locale):
+        del locale
+        context = json.loads(re.search(r"\{.*\}", messages[-1]["content"], flags=re.DOTALL).group(0))
+        condition_node_id = next(node["id"] for node in context["graph"]["nodes"] if node["node_type"] == "condition")
+        session_node_id = next(
+            node["id"] for node in context["graph"]["nodes"] if node["node_type"] == "session" and node["label"] == session_id
+        )
+        return ModelResult(
+            content=json.dumps(
+                {
+                    "rows": [
+                        {
+                            "from_ref": condition_node_id,
+                            "to_ref": session_node_id,
+                            "association_type": "possibly_related_to",
+                            "confidence": "medium",
+                            "evidence_summary": "既往心脏病和这次胸痛会话可能相关。",
+                            "source_session_ids": [session_id],
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            model=HTTP_MODEL_NAME,
+        )
+
+    client.app.state.model_adapter.generate_text = analysis_generate_text
+    analyzed = client.post(f"/api/v1/users/{user['id']}/association-analysis")
+    assert analyzed.status_code == 200
+
+    deleted = client.delete(f"/api/v1/sessions/{session_id}")
+    assert deleted.status_code == 200
+
+    graph_after = client.get(f"/api/v1/users/{user['id']}/graph")
+    assert graph_after.status_code == 200
+    assert all(
+        session_id not in edge["payload"].get("source_session_ids", [])
+        for edge in graph_after.json()["edges"]
+        if edge["edge_type"].startswith("MODEL_")
+    )
 
 
 def test_triage_progresses_from_intake_to_conclusion_by_round(client):

@@ -234,6 +234,22 @@ class UserGraphResponse(BaseModel):
     summary_bundle: GraphContextBundle
 
 
+class AssociationAnalysisRow(BaseModel):
+    from_ref: str
+    to_ref: str
+    association_type: str
+    confidence: str
+    evidence_summary: str
+    source_session_ids: list[str] = Field(default_factory=list)
+
+
+class AssociationAnalysisResponse(BaseModel):
+    ok: bool
+    rows: list[AssociationAnalysisRow] = Field(default_factory=list)
+    written_edges_count: int = 0
+    analyzed_at: datetime
+
+
 class UserDeleteResponse(BaseModel):
     deleted: bool
     user_id: str

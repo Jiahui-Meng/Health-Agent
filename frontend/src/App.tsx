@@ -14,6 +14,7 @@ import {
   getMessages,
   getModelConfigStatus,
   getOAuthStatus,
+  runAssociationAnalysis,
   getUserGraph,
   getUserSessions,
   getUsers,
@@ -195,7 +196,21 @@ const UI_TEXT = {
     graphRiskAll: '全部风险',
     graphRiskHigh: '仅高风险/紧急',
     graphRiskHideLow: '隐藏低风险',
+    graphInferredLinks: '显示候选关联边',
+    graphAnalysisLinks: '显示模型分析边',
+    graphRunAnalysis: '运行关联分析',
+    graphAnalyzing: '分析中...',
     graphDetails: '节点详情',
+    graphAnalysisTable: '关联性对照表',
+    graphAnalysisEmpty: '暂无模型分析结果',
+    graphAnalysisModeDetails: '详情',
+    graphAnalysisModeTable: '对照表',
+    graphAnalysisType: '关联类型',
+    graphAnalysisConfidence: '置信度',
+    graphAnalysisEvidence: '证据摘要',
+    graphAnalysisSessions: '来源会话',
+    graphDetailNode: '节点',
+    graphDetailAssociation: '候选关联边',
     graphNoSelection: '点击节点以查看详情',
     risk: {
       low: '低风险',
@@ -304,7 +319,21 @@ const UI_TEXT = {
     graphRiskAll: 'All Risk',
     graphRiskHigh: 'Only High / Emergency',
     graphRiskHideLow: 'Hide Low',
+    graphInferredLinks: 'Show Inferred Links',
+    graphAnalysisLinks: 'Show Analysis Links',
+    graphRunAnalysis: 'Run Association Analysis',
+    graphAnalyzing: 'Analyzing...',
     graphDetails: 'Node Details',
+    graphAnalysisTable: 'Association Table',
+    graphAnalysisEmpty: 'No model analysis results yet.',
+    graphAnalysisModeDetails: 'Details',
+    graphAnalysisModeTable: 'Association Table',
+    graphAnalysisType: 'Association Type',
+    graphAnalysisConfidence: 'Confidence',
+    graphAnalysisEvidence: 'Evidence',
+    graphAnalysisSessions: 'Source Sessions',
+    graphDetailNode: 'Node',
+    graphDetailAssociation: 'Inferred Association',
     graphNoSelection: 'Select a node to inspect details',
     risk: {
       low: 'LOW',
@@ -514,6 +543,7 @@ export default function App() {
   const [users, setUsers] = useState<UserProfile[]>([])
   const [activeUserId, setActiveUserId] = useState('')
   const [userGraph, setUserGraph] = useState<UserGraphResponse | null>(null)
+  const [analyzingAssociations, setAnalyzingAssociations] = useState(false)
 
   const [showUserModal, setShowUserModal] = useState(false)
   const [isEditingUser, setIsEditingUser] = useState(false)
@@ -972,6 +1002,36 @@ export default function App() {
   const graphHistoricalSignals = graphRiskSignals
     .filter((item) => !graphActiveSignals.some((active) => active.label === item.label && active.session_id === item.session_id))
     .slice(0, 3)
+  const graphAnalysisRows = useMemo(() => {
+    if (!userGraph) return []
+    return userGraph.edges
+      .filter((edge) => edge.edge_type.startsWith('MODEL_'))
+      .map((edge) => ({
+        from_ref: edge.from_node_id,
+        to_ref: edge.to_node_id,
+        association_type: edge.edge_type.replace(/^MODEL_/, '').toLowerCase(),
+        confidence: String(edge.payload?.confidence || 'low'),
+        evidence_summary: String(edge.payload?.evidence_summary || ''),
+        source_session_ids: Array.isArray(edge.payload?.source_session_ids)
+          ? edge.payload.source_session_ids.map((item) => String(item))
+          : [],
+      }))
+  }, [userGraph])
+
+  async function onRunAssociationAnalysis() {
+    if (!activeUserId) return
+    setAnalyzingAssociations(true)
+    setError('')
+    try {
+      await runAssociationAnalysis(activeUserId)
+      const graph = await getUserGraph(activeUserId)
+      setUserGraph(graph)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setAnalyzingAssociations(false)
+    }
+  }
 
   return (
     <div className="page">
@@ -1015,12 +1075,29 @@ export default function App() {
               riskAll: t.graphRiskAll,
               riskHigh: t.graphRiskHigh,
               riskHideLow: t.graphRiskHideLow,
+              inferredLinks: t.graphInferredLinks,
+              analysisLinks: t.graphAnalysisLinks,
+              runAnalysis: t.graphRunAnalysis,
+              analyzing: t.graphAnalyzing,
               details: t.graphDetails,
+              analysisTable: t.graphAnalysisTable,
+              analysisEmpty: t.graphAnalysisEmpty,
+              analysisModeDetails: t.graphAnalysisModeDetails,
+              analysisModeTable: t.graphAnalysisModeTable,
+              analysisType: t.graphAnalysisType,
+              analysisConfidence: t.graphAnalysisConfidence,
+              analysisEvidence: t.graphAnalysisEvidence,
+              analysisSessions: t.graphAnalysisSessions,
+              detailTypeNode: t.graphDetailNode,
+              detailTypeAssociation: t.graphDetailAssociation,
               noSelection: t.graphNoSelection,
               longTerm: t.graphLongTerm,
               sessions: t.history,
               viewGraph: t.viewGraph,
             }}
+            analysisRows={graphAnalysisRows}
+            analyzingAssociations={analyzingAssociations}
+            onRunAssociationAnalysis={() => void onRunAssociationAnalysis()}
           />
         ) : (
           <>
