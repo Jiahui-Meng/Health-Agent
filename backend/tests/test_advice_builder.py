@@ -19,6 +19,7 @@ def test_build_advice_sections_for_respiratory_conclusion():
     assert "rest_guidance" in sections
     assert "monitoring_guidance" in sections
     assert "visit_guidance" in sections
+    assert any("对乙酰氨基酚" in item or "布洛芬" in item for item in sections["medication_guidance"]["items"])
 
 
 def test_build_advice_sections_for_gastro_conclusion():
@@ -112,6 +113,43 @@ def test_build_advice_sections_emergency_uses_region_context():
     )
     assert sections is not None
     assert any("119" in item for item in sections["visit_guidance"]["items"])
+    assert any("不建议自行加用药物" in item or "Do not add self-directed medication" in item for item in sections["medication_guidance"]["items"])
+
+
+def test_build_advice_sections_low_risk_explicitly_says_no_hospital_needed():
+    answer = {
+        "stage": "conclusion",
+        "summary": "目前更像轻度上呼吸道不适。",
+        "risk_level": "low",
+        "next_steps": ["休息观察"],
+    }
+    sections = build_advice_sections(
+        locale="zh-CN",
+        message="我有点喉咙干，没有发烧，也没有明显加重",
+        answer=answer,
+        health_profile={"sex": "female"},
+        region_code="HK",
+    )
+    assert sections is not None
+    assert any("没有明确必须马上去医院" in item for item in sections["visit_guidance"]["items"])
+
+
+def test_build_advice_sections_low_risk_can_explicitly_say_no_medication_needed():
+    answer = {
+        "stage": "conclusion",
+        "summary": "目前更像轻度不适。",
+        "risk_level": "low",
+        "next_steps": ["观察变化"],
+    }
+    sections = build_advice_sections(
+        locale="zh-CN",
+        message="我只是有点累，想看看要不要处理",
+        answer=answer,
+        health_profile={"sex": "male"},
+        region_code="HK",
+    )
+    assert sections is not None
+    assert any("目前不一定需要吃药" in item for item in sections["medication_guidance"]["items"])
 
 
 def test_advice_sections_to_next_steps_prefers_primary_sections():

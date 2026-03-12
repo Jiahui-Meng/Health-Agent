@@ -145,13 +145,15 @@ def _build_visit_guidance(
     region_code: str,
 ) -> dict | None:
     needs_visit = force_in_person or risk_level in {"medium", "high", "emergency"} or flags["worsening"]
-    if not needs_visit:
-        return None
-
     department = _recommend_department(locale, flags, age_group=age_group)
     emergency_phone = EMERGENCY_PHONE_MAP.get(region_code, "")
     if locale.startswith("zh"):
-        if risk_level == "emergency":
+        if not needs_visit:
+            items = [
+                "目前没有明确必须马上去医院的信号，可先在家观察、休息并按监测建议记录变化。",
+                "如果症状持续不缓解、再次明显加重，或出现胸痛、气促、持续高热、剧烈腹痛、意识异常等情况，再尽快改为线下就医。",
+            ]
+        elif risk_level == "emergency":
             items = [
                 f"请立即前往急诊；如无法自行前往，马上呼叫当地急救服务。",
                 "不要继续等待症状自行缓解，也不要自行开车前往医院。",
@@ -174,7 +176,12 @@ def _build_visit_guidance(
             items.append("老年人一旦出现反应变慢、脱水、行走不稳或食欲明显下降，建议提前线下评估，不要长时间在家观察。")
         title = "挂号 / 就医建议"
     else:
-        if risk_level == "emergency":
+        if not needs_visit:
+            items = [
+                "There is no clear sign right now that you must go to the hospital immediately; home observation and monitoring are reasonable first steps.",
+                "Switch to in-person care promptly if symptoms persist, clearly worsen, or new red flags such as chest pain, breathing difficulty, sustained fever, severe abdominal pain, or confusion appear.",
+            ]
+        elif risk_level == "emergency":
             items = [
                 "Go to the emergency department now. If needed, call local emergency services immediately.",
                 "Do not keep waiting for symptoms to settle on their own, and do not drive yourself if you feel unsafe.",
@@ -196,7 +203,11 @@ def _build_visit_guidance(
         elif age_group == "older_adult":
             items.append("Use a lower threshold for in-person review if there is slowing down, dehydration, poor intake, or mobility decline.")
         title = "Visit Guidance"
-    return {"title": title, "items": items, "priority": "primary" if risk_level in PRIMARY_RISK_LEVELS else "secondary"}
+    return {
+        "title": title,
+        "items": items,
+        "priority": "primary" if risk_level in PRIMARY_RISK_LEVELS else "secondary",
+    }
 
 
 def _build_medication_guidance(
@@ -208,21 +219,43 @@ def _build_medication_guidance(
     *,
     age_group: str,
 ) -> dict | None:
-    if risk_level in PRIMARY_RISK_LEVELS or flags["chest_pain"] or flags["short_breath"]:
-        return None
-    if not any([flags["fever"], flags["pain"], flags["cough"], flags["sore_throat"], flags["gastro"]]):
-        return None
-
     allergies = profile.get("allergies") or []
     has_history = bool(profile.get("conditions") or profile.get("medications") or allergies)
     items: list[str] = []
+
+    if risk_level in PRIMARY_RISK_LEVELS or flags["chest_pain"] or flags["short_breath"]:
+        if locale.startswith("zh"):
+            items = [
+                "当前不建议自行加用药物掩盖症状，先按就医建议尽快线下评估。",
+            ]
+            title = "用药建议"
+        else:
+            items = [
+                "Do not add self-directed medication just to mask symptoms right now; follow the visit guidance and get in-person assessment first.",
+            ]
+            title = "Medication Guidance"
+        return {"title": title, "items": items, "priority": "secondary"}
+
+    if not any([flags["fever"], flags["pain"], flags["cough"], flags["sore_throat"], flags["gastro"]]):
+        if locale.startswith("zh"):
+            items = [
+                "目前不一定需要吃药，可先以休息、补水和观察为主。",
+            ]
+            title = "用药建议"
+        else:
+            items = [
+                "Medication may not be necessary right now; rest, hydration, and observation are reasonable first steps.",
+            ]
+            title = "Medication Guidance"
+        return {"title": title, "items": items, "priority": "secondary"}
+
     if locale.startswith("zh"):
         if flags["fever"] or flags["pain"] or flags["sore_throat"]:
-            items.append("如果你平时可安全使用非处方退烧止痛药，可只选择一种并严格按说明书使用，不要重复叠加相同成分。")
+            items.append("如果你平时可安全使用非处方药，可只选一种常见退烧止痛药，例如对乙酰氨基酚或布洛芬，并严格按说明书使用，不要叠加同类成分。")
         if flags["cough"] or flags["sore_throat"]:
-            items.append("咽痛或咳嗽明显时，可优先考虑润喉、温热饮水、生理盐水鼻腔护理等非处方对症方式。")
+            items.append("咽痛或咳嗽明显时，可先考虑润喉含片；如果主要是干咳，可向药师咨询右美沙芬类非处方止咳药是否合适。")
         if flags["gastro"]:
-            items.append("腹泻或呕吐时，可优先考虑口服补液盐或电解质补充饮品，重点先纠正脱水风险。")
+            items.append("腹泻或呕吐时，可优先考虑口服补液盐，重点先纠正脱水风险；一般不建议先自行叠加止泻药。")
         if has_history:
             items.append("如你本身有慢病、长期用药或药物过敏史，购买或服用任何非处方药前先咨询药师或医生。")
         if age_group in {"child", "adolescent"}:
@@ -232,11 +265,11 @@ def _build_medication_guidance(
         title = "用药建议"
     else:
         if flags["fever"] or flags["pain"] or flags["sore_throat"]:
-            items.append("If OTC fever or pain relief is usually safe for you, choose only one product and follow the label closely; avoid doubling up similar ingredients.")
+            items.append("If OTC medication is usually safe for you, choose only one common fever or pain reliever such as acetaminophen or ibuprofen, and follow the label closely without doubling similar ingredients.")
         if flags["cough"] or flags["sore_throat"]:
-            items.append("For cough or sore throat, prioritize supportive OTC measures such as lozenges, warm fluids, or saline-based care.")
+            items.append("For cough or sore throat, start with lozenges; if the main issue is dry cough, ask a pharmacist whether an OTC dextromethorphan product is appropriate.")
         if flags["gastro"]:
-            items.append("With vomiting or diarrhea, focus first on oral rehydration or electrolyte replacement rather than symptom suppression alone.")
+            items.append("With vomiting or diarrhea, focus first on oral rehydration salts or electrolyte replacement rather than layering extra symptom-suppression medicines.")
         if has_history:
             items.append("If you have chronic conditions, regular medications, or drug allergies, check with a pharmacist or clinician before taking any OTC medication.")
         if age_group in {"child", "adolescent"}:
@@ -400,6 +433,9 @@ def _sanitize_advice_sections(advice_sections: dict[str, dict], *, locale: str, 
 
 
 def _detect_flags(text_blob: str) -> dict[str, bool]:
+    worsening = _contains_any(text_blob, ["加重", "更严重", " worsening", "worse", "worsen"])
+    if _contains_any(text_blob, ["没有加重", "未加重", "没有明显加重", "not worsening", "not worse", "no worse"]):
+        worsening = False
     flags = {
         "fever": _contains_any(text_blob, ["发烧", "发热", "fever", "high temperature"]),
         "cough": _contains_any(text_blob, ["咳嗽", "cough"]),
@@ -412,7 +448,7 @@ def _detect_flags(text_blob: str) -> dict[str, bool]:
         "vomiting": _contains_any(text_blob, ["呕吐", "恶心", "vomit", "vomiting", "nausea"]),
         "fatigue": _contains_any(text_blob, ["乏力", "疲劳", "fatigue", "tired"]),
         "pain": _contains_any(text_blob, ["疼", "痛", "pain", "ache"]),
-        "worsening": _contains_any(text_blob, ["加重", "更严重", " worsening", "worse", "worsen"]),
+        "worsening": worsening,
         "gastro": False,
     }
     flags["gastro"] = flags["abdominal_pain"] or flags["diarrhea"] or flags["vomiting"]
