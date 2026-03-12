@@ -76,6 +76,11 @@ body {
   gap: 16px;
 }
 
+.graph-main {
+  position: relative;
+  z-index: 1;
+}
+
 .panel {
   background: color-mix(in oklab, var(--panel), white 4%);
   border: 1px solid rgba(18, 38, 32, 0.12);
@@ -342,6 +347,43 @@ textarea {
   margin: 0 0 8px;
 }
 
+.advice-section-list {
+  display: grid;
+  gap: 10px;
+}
+
+.advice-section-list + .advice-section-list,
+.advice-section-list + .emergency,
+.advice-section-list + h3 {
+  margin-top: 12px;
+}
+
+.advice-section {
+  border: 1px solid rgba(18, 38, 32, 0.1);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.advice-section-primary {
+  border-color: rgba(15, 118, 110, 0.22);
+  background: rgba(230, 248, 243, 0.82);
+}
+
+.advice-section-secondary {
+  background: rgba(255, 255, 255, 0.45);
+}
+
+.advice-section h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.advice-section ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
 .assistant-card ul {
   margin: 8px 0 0;
   padding-left: 18px;
@@ -496,6 +538,294 @@ button:disabled {
   padding-inline: 10px;
 }
 
+.graph-page {
+  display: grid;
+  gap: 16px;
+}
+
+.graph-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  background: color-mix(in oklab, var(--panel), white 4%);
+  border: 1px solid rgba(18, 38, 32, 0.12);
+  border-radius: 16px;
+  box-shadow: 0 10px 30px rgba(18, 38, 32, 0.06);
+  padding: 14px 16px;
+}
+
+.graph-toolbar-main {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.graph-toolbar h2 {
+  margin: 0;
+  font-size: 1.2rem;
+}
+
+.graph-toolbar p {
+  margin: 4px 0 0;
+  color: #48655b;
+}
+
+.graph-toolbar-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.graph-back {
+  background: linear-gradient(120deg, #1f3a32, #33574c);
+}
+
+.graph-shell {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr) 320px;
+  gap: 16px;
+  min-height: 74vh;
+}
+
+.graph-sidebar,
+.graph-detail-panel,
+.graph-canvas-panel {
+  background: color-mix(in oklab, var(--panel), white 4%);
+  border: 1px solid rgba(18, 38, 32, 0.12);
+  border-radius: 16px;
+  box-shadow: 0 10px 30px rgba(18, 38, 32, 0.06);
+}
+
+.graph-sidebar,
+.graph-detail-panel {
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+.graph-canvas-panel {
+  overflow: hidden;
+  min-height: 74vh;
+}
+
+.graph-filter-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #d7e4de;
+  border-radius: 12px;
+  background: #f8fcfb;
+  padding: 12px;
+}
+
+.graph-filter-card h3,
+.graph-detail-panel h3 {
+  margin: 0;
+  font-size: 0.98rem;
+}
+
+.graph-filter-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.graph-toggle-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #d4e2dc;
+  border-radius: 999px;
+  background: #fff;
+  padding: 5px 10px;
+  font-size: 0.8rem;
+}
+
+.graph-toggle-chip input {
+  margin: 0;
+}
+
+.graph-detail-card {
+  display: grid;
+  gap: 10px;
+}
+
+.graph-detail-card p,
+.graph-detail-card dl,
+.graph-detail-card pre {
+  margin: 0;
+}
+
+.graph-detail-card dl {
+  display: grid;
+  gap: 8px;
+}
+
+.graph-detail-card dl div {
+  display: grid;
+  gap: 3px;
+}
+
+.graph-detail-card dt {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  color: #5f766d;
+  font-weight: 700;
+}
+
+.graph-detail-card dd {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.graph-detail-card pre {
+  background: #11231d;
+  color: #d7ede8;
+  border-radius: 12px;
+  padding: 12px;
+  overflow: auto;
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+.graph-detail-badge {
+  width: fit-content;
+  border-radius: 999px;
+  padding: 4px 9px;
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.graph-detail-badge-low,
+.graph-node-badge-low {
+  background: var(--risk-low);
+}
+
+.graph-detail-badge-medium,
+.graph-node-badge-medium {
+  background: var(--risk-medium);
+}
+
+.graph-detail-badge-high,
+.graph-node-badge-high {
+  background: var(--risk-high);
+}
+
+.graph-detail-badge-emergency,
+.graph-node-badge-emergency {
+  background: var(--risk-emergency);
+}
+
+.graph-detail-badge-muted,
+.graph-node-badge-muted {
+  background: #5f766d;
+}
+
+.graph-node {
+  min-width: 190px;
+  max-width: 240px;
+  border-radius: 16px;
+  border: 1px solid rgba(18, 38, 32, 0.14);
+  background: rgba(255, 255, 255, 0.92);
+  padding: 12px 14px;
+  box-shadow: 0 10px 30px rgba(18, 38, 32, 0.08);
+  position: relative;
+}
+
+.graph-node-highlighted {
+  box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.35), 0 10px 30px rgba(18, 38, 32, 0.12);
+}
+
+.graph-node-user {
+  background: linear-gradient(160deg, #10342d, #0f766e);
+  color: #fff;
+}
+
+.graph-node-group {
+  background: #f2f7f5;
+}
+
+.graph-node-session {
+  background: #fff9f2;
+}
+
+.graph-node-summary {
+  background: #fff;
+}
+
+.graph-node-risk_signal {
+  background: #fff7f5;
+}
+
+.graph-node-symptom_event,
+.graph-node-symptom,
+.graph-node-timeline_marker,
+.graph-node-long_term {
+  background: #fcfdfc;
+}
+
+.graph-node-title-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.graph-node-title-row strong {
+  font-size: 0.9rem;
+  line-height: 1.35;
+}
+
+.graph-node-subtitle {
+  font-size: 0.72rem;
+  color: #5f766d;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 5px;
+}
+
+.graph-node-user .graph-node-subtitle,
+.graph-node-user .graph-node-meta {
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.graph-node-meta {
+  margin-top: 6px;
+  font-size: 0.76rem;
+  color: #466157;
+}
+
+.graph-node-badge {
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.graph-node-toggle {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgba(18, 38, 32, 0.08);
+  font-weight: 700;
+}
+
+.graph-handle {
+  opacity: 0;
+  pointer-events: none;
+}
+
 @keyframes rise {
   from {
     opacity: 0;
@@ -510,6 +840,14 @@ button:disabled {
 @media (max-width: 1024px) {
   .layout {
     grid-template-columns: 1fr;
+  }
+
+  .graph-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .graph-toolbar {
+    flex-direction: column;
   }
 
   .chat-panel {

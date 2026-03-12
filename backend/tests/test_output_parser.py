@@ -24,3 +24,13 @@ def test_parse_model_json_intake_fallback_summary_is_doctor_like():
     )
     assert parsed["stage"] == "intake"
     assert "我先确认" in parsed["summary"] or "问清楚" in parsed["summary"]
+
+
+def test_parse_model_json_preserves_advice_sections_on_conclusion():
+    parsed = parse_model_json(
+        '{"summary":"结论","risk_level":"medium","next_steps":["观察"],"disclaimer":"仅供参考","stage":"conclusion","advice_sections":{"visit_guidance":{"title":"挂号建议","items":["预约全科"],"priority":"primary"}}}',
+        "zh-CN",
+    )
+    assert parsed["stage"] == "conclusion"
+    assert parsed["advice_sections"] is not None
+    assert parsed["advice_sections"]["visit_guidance"]["title"] == "挂号建议"

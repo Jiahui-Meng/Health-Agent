@@ -1,8 +1,9 @@
 export type RiskLevel = 'low' | 'medium' | 'high' | 'emergency'
+export type SexValue = 'male' | 'female'
 
 export type HealthProfile = {
   age_range?: string
-  sex?: string
+  sex?: SexValue
   conditions?: string[]
   medications?: string[]
   allergies?: string[]
@@ -29,6 +30,14 @@ export type ChatResponse = {
     disclaimer: string
     stage: 'intake' | 'conclusion'
     follow_up_questions?: string[] | null
+    advice_sections?: {
+      medication_guidance?: AdviceSection | null
+      visit_guidance?: AdviceSection | null
+      rest_guidance?: AdviceSection | null
+      diet_guidance?: AdviceSection | null
+      exercise_guidance?: AdviceSection | null
+      monitoring_guidance?: AdviceSection | null
+    } | null
   }
   meta: {
     session_id: string
@@ -36,6 +45,12 @@ export type ChatResponse = {
     model: string
     user_id?: string | null
   }
+}
+
+export type AdviceSection = {
+  title: string
+  items: string[]
+  priority: 'primary' | 'secondary'
 }
 
 export type SessionItem = {
@@ -55,7 +70,7 @@ export type UserProfile = {
   locale: string
   region_code: string
   birth_year: string
-  sex: string
+  sex: SexValue | ''
   conditions: string[]
   medications: string[]
   allergies: string[]
@@ -69,7 +84,7 @@ export type UserCreateRequest = {
   locale: string
   region_code: string
   birth_year: string
-  sex: string
+  sex: SexValue
   conditions: string[]
   medications: string[]
   allergies: string[]

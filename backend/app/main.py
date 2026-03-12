@@ -41,6 +41,7 @@ from .schemas import (
 from .services.context_builder import build_context
 from .services.model_adapter import ModelAdapter, ModelAPIError, ModelResult, normalize_model_base_url
 from .services.codex_cli import CodexCliError, CodexCliService
+from .services.advice_builder import advice_sections_to_next_steps, build_advice_sections
 from .services.graph_service import (
     create_or_update_user,
     delete_session_graph_subtree,
@@ -57,8 +58,10 @@ from .services.safety import (
     classify_risk,
     enforce_intake_questioning,
     enforce_no_diagnosis_or_prescription,
+    enforce_sex_consistency,
     max_risk,
 )
+from .services.sex_normalizer import normalize_sex
 from .services.summarizer import build_summary
 from .services.triage_runtime import (
     apply_stage_rules as runtime_apply_stage_rules,
@@ -140,6 +143,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         if existing:
             raise HTTPException(status_code=409, detail="Username already exists")
+        normalized_sex = normalize_sex(payload.sex)
+        if not normalized_sex:
+            raise HTTPException(status_code=422, detail="Sex is required and must be one of male/female.")
 
         user = create_or_update_user(
             db,
@@ -147,7 +153,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             locale=payload.locale,
             region_code=payload.region_code,
             birth_year=payload.birth_year.strip(),
-            sex=payload.sex.strip(),
+            sex=normalized_sex,
             conditions=payload.conditions,
             medications=payload.medications,
             allergies=payload.allergies,
@@ -169,7 +175,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if payload.birth_year is not None:
             user.birth_year = payload.birth_year.strip()
         if payload.sex is not None:
-            user.sex = payload.sex.strip()
+            normalized_sex = normalize_sex(payload.sex)
+            if not normalized_sex:
+                raise HTTPException(status_code=422, detail="Sex is required and must be one of male/female.")
+            user.sex = normalized_sex
         if payload.mark_active:
             mark_user_active(db, user)
 
@@ -223,7 +232,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 locale=profile.locale,
                 region_code=profile.region_code,
                 birth_year=profile.birth_year.strip(),
-                sex=profile.sex.strip(),
+                sex=normalize_sex(profile.sex),
                 conditions=profile.conditions,
                 medications=profile.medications,
                 allergies=profile.allergies,
@@ -406,6 +415,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runtime_config = _ensure_runtime_config_row(db, app_settings)
         user_record = _resolve_user_record(db, payload)
         if user_record:
+            if not normalize_sex(user_record.sex):
+                raise HTTPException(status_code=422, detail="User sex is required before starting chat.")
             mark_user_active(db, user_record)
             payload.locale = user_record.locale or payload.locale
             payload.region_code = user_record.region_code or payload.region_code
@@ -454,6 +465,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ),
                 "stage": "conclusion",
                 "follow_up_questions": None,
+                "advice_sections": None,
             }
             session_record.triage_stage = "conclusion"
             model_name = "safety-router"
@@ -501,6 +513,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             else:
                 user_prompt = build_user_prompt(
                     locale=payload.locale,
+                    region_code=payload.region_code,
                     message=payload.message,
                     profile=payload.health_profile,
                     long_summary=context.summary,
@@ -543,8 +556,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 answer = enforce_intake_questioning(answer, payload.locale)
             else:
                 answer = enforce_no_diagnosis_or_prescription(answer, payload.locale)
+                answer["advice_sections"] = build_advice_sections(
+                    locale=payload.locale,
+                    message=payload.message,
+                    answer=answer,
+                    health_profile=session_record.health_profile or {},
+                    region_code=payload.region_code,
+                )
+                answer["next_steps"] = advice_sections_to_next_steps(answer["advice_sections"], answer.get("next_steps") or [])
             model_name = model_result.model
             used_context_turns = context.used_turns
+
+        if answer.get("stage") == "conclusion" and not answer.get("advice_sections"):
+            answer["advice_sections"] = build_advice_sections(
+                locale=payload.locale,
+                message=payload.message,
+                answer=answer,
+                health_profile=session_record.health_profile or {},
+                region_code=payload.region_code,
+            )
+            answer["next_steps"] = advice_sections_to_next_steps(answer["advice_sections"], answer.get("next_steps") or [])
+        answer = enforce_sex_consistency(
+            answer,
+            payload.locale,
+            (session_record.health_profile or {}).get("sex") or (user_record.sex if user_record else ""),
+        )
 
         assistant_message = MessageRecord(
             session_id=session_record.id,
@@ -709,6 +745,8 @@ def _merge_profile(session_record: SessionRecord, incoming: dict | None) -> bool
     changed = False
 
     for key, value in incoming.items():
+        if key == "sex":
+            value = normalize_sex(value)
         if value is None:
             continue
         if isinstance(value, list) and not value:
@@ -954,7 +992,7 @@ def _serialize_user_profile(db: Session, user: UserRecord) -> UserProfile:
         locale=user.locale,
         region_code=user.region_code,
         birth_year=user.birth_year or "",
-        sex=user.sex or "",
+        sex=normalize_sex(user.sex),
         conditions=_persistent_values(db, user.id, "condition"),
         medications=_persistent_values(db, user.id, "medication"),
         allergies=_persistent_values(db, user.id, "allergy"),

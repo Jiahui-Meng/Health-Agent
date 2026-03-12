@@ -1,6 +1,8 @@
 import re
 from dataclasses import dataclass
 
+from .profile_guardrails import has_sex_mismatch, normalize_sex
+
 
 RISK_SCORE = {"low": 1, "medium": 2, "high": 3, "emergency": 4}
 
@@ -137,6 +139,7 @@ def enforce_no_diagnosis_or_prescription(answer: dict, locale: str) -> dict:
 
     answer["summary"] = safe_summary
     answer["next_steps"] = safe_steps
+    answer["advice_sections"] = None
     if RISK_SCORE.get(answer.get("risk_level", "low"), 1) < RISK_SCORE["medium"]:
         answer["risk_level"] = "medium"
     return answer
@@ -156,6 +159,7 @@ def enforce_intake_questioning(answer: dict, locale: str) -> dict:
 
     if not unsafe_summary and follow_ups:
         answer["next_steps"] = []
+        answer["advice_sections"] = None
         return answer
 
     if locale.startswith("zh"):
@@ -171,6 +175,69 @@ def enforce_intake_questioning(answer: dict, locale: str) -> dict:
             "What is the main symptom right now, and how severe is it?",
         ]
     answer["next_steps"] = []
+    answer["advice_sections"] = None
+    return answer
+
+
+def enforce_sex_consistency(answer: dict, locale: str, sex: str) -> dict:
+    normalized = normalize_sex(sex)
+    if not normalized:
+        return answer
+
+    summary = str(answer.get("summary") or "")
+    next_steps = [str(item) for item in (answer.get("next_steps") or [])]
+    follow_ups = [str(item) for item in (answer.get("follow_up_questions") or [])]
+    advice_sections = answer.get("advice_sections") or {}
+
+    mismatched = has_sex_mismatch(summary, normalized) or any(
+        has_sex_mismatch(item, normalized) for item in next_steps + follow_ups
+    )
+    for section in advice_sections.values() if isinstance(advice_sections, dict) else []:
+        if isinstance(section, dict) and any(
+            has_sex_mismatch(str(item), normalized) for item in (section.get("items") or [])
+        ):
+            mismatched = True
+            break
+
+    if not mismatched:
+        return answer
+
+    if answer.get("stage") == "intake":
+        if locale.startswith("zh"):
+            answer["summary"] = "我先继续确认与你当前不适最直接相关的情况。"
+            answer["follow_up_questions"] = [
+                "这些症状大概是从什么时候开始的？",
+                "现在最明显的不舒服是什么，严重程度大概几分？",
+            ]
+        else:
+            answer["summary"] = "I want to stay focused on the symptoms that are most directly relevant to what you are feeling now."
+            answer["follow_up_questions"] = [
+                "When did these symptoms start?",
+                "What is the main symptom right now, and how severe is it?",
+            ]
+        answer["next_steps"] = []
+        answer["advice_sections"] = None
+        return answer
+
+    if locale.startswith("zh"):
+        answer["summary"] = "基于目前信息，建议围绕你当前症状本身做处理和线下评估，不考虑与当前性别明显不相符的专项问题。"
+    else:
+        answer["summary"] = "Based on the information so far, guidance should stay focused on the current symptoms rather than sex-mismatched specialty issues."
+
+    answer["next_steps"] = [step for step in next_steps if not has_sex_mismatch(step, normalized)]
+    cleaned_sections = {}
+    if isinstance(advice_sections, dict):
+        for key, section in advice_sections.items():
+            if not isinstance(section, dict):
+                continue
+            items = [
+                str(item)
+                for item in (section.get("items") or [])
+                if not has_sex_mismatch(str(item), normalized)
+            ]
+            if items:
+                cleaned_sections[key] = {**section, "items": items}
+    answer["advice_sections"] = cleaned_sections or None
     return answer
 
 

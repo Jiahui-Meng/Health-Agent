@@ -13,17 +13,23 @@ def test_build_system_prompt_bilingual():
     assert "intake" in zh_prompt.lower()
     assert "conclusion" in en_prompt.lower()
     assert "风险等级说明" in zh_prompt
+    assert "advice_sections" in zh_prompt
+    assert "advice_sections" in en_prompt
+    assert "性别约束" in zh_prompt or "性别" in zh_prompt
+    assert "profile guardrails" in en_prompt.lower() or "sex-specific" in en_prompt.lower()
 
 
 def test_build_user_prompt_contains_profile_and_context():
     profile = HealthProfile(
         age_range="30-39",
+        sex="male",
         conditions=["asthma"],
         medications=["inhaler"],
         allergies=["penicillin"],
     )
     prompt = build_user_prompt(
         locale="en-US",
+        region_code="US",
         message="I have cough for 3 days",
         profile=profile,
         long_summary="Recurring cough pattern",
@@ -42,6 +48,9 @@ def test_build_user_prompt_contains_profile_and_context():
     assert data["graph_context"]["persistent_features"]["conditions"] == ["asthma"]
     assert data["triage_stage"] == "intake"
     assert data["triage_round_count"] == 2
+    assert data["sex_normalized"] == "male"
+    assert len(data["sex_specific_guardrails"]) >= 1
+    assert data["region_normalized"] == "US"
 
 
 def test_build_codex_mcp_prompt_contains_tool_instructions():

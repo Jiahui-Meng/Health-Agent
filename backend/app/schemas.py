@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import datetime
 from typing import Literal
 
@@ -7,6 +9,7 @@ from pydantic import BaseModel, Field
 RiskLevel = Literal["low", "medium", "high", "emergency"]
 TriageStage = Literal["intake", "conclusion"]
 ProviderMode = Literal["codex_cli", "oauth_cli", "http_api"]
+AdvicePriority = Literal["primary", "secondary"]
 
 
 class HealthProfile(BaseModel):
@@ -37,6 +40,22 @@ class ChatAnswer(BaseModel):
     disclaimer: str
     stage: TriageStage = "conclusion"
     follow_up_questions: list[str] | None = None
+    advice_sections: "AdviceSections | None" = None
+
+
+class AdviceSection(BaseModel):
+    title: str
+    items: list[str] = Field(default_factory=list)
+    priority: AdvicePriority = "secondary"
+
+
+class AdviceSections(BaseModel):
+    medication_guidance: AdviceSection | None = None
+    visit_guidance: AdviceSection | None = None
+    rest_guidance: AdviceSection | None = None
+    diet_guidance: AdviceSection | None = None
+    exercise_guidance: AdviceSection | None = None
+    monitoring_guidance: AdviceSection | None = None
 
 
 class ChatMeta(BaseModel):

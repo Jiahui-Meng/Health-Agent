@@ -13,8 +13,11 @@ def build_export_context(
     messages: list[MessageRecord],
     graph_summary: dict,
 ) -> dict:
+    valid_session_ids = {session.id for session in sessions}
     messages_by_session: dict[str, list[dict[str, str]]] = defaultdict(list)
     for message in messages:
+        if message.session_id not in valid_session_ids:
+            continue
         messages_by_session[message.session_id].append(
             {
                 "role": message.role,
@@ -25,6 +28,17 @@ def build_export_context(
         )
 
     persistent = graph_summary.get("persistent_features") or {}
+    recent_journey = [
+        item
+        for item in (graph_summary.get("recent_journey") or [])
+        if not item.get("session_id") or item.get("session_id") in valid_session_ids
+    ]
+    risk_signals = [
+        item
+        for item in (graph_summary.get("risk_signals") or [])
+        if not isinstance(item, dict) or not item.get("session_id") or item.get("session_id") in valid_session_ids
+    ]
+    summary_labels = [session.summary.strip() for session in sessions if (session.summary or "").strip()][:5]
     return {
         "user": {
             "username": user.username,
@@ -37,9 +51,9 @@ def build_export_context(
             "allergies": persistent.get("allergies") or [],
         },
         "graph_summary": {
-            "recent_journey": graph_summary.get("recent_journey") or [],
-            "risk_signals": graph_summary.get("risk_signals") or [],
-            "summary_labels": graph_summary.get("summary_labels") or [],
+            "recent_journey": recent_journey,
+            "risk_signals": risk_signals,
+            "summary_labels": summary_labels,
         },
         "sessions": [
             {

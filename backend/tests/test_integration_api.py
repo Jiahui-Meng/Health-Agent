@@ -82,6 +82,24 @@ def _create_user(client, username="alice"):
     return response.json()
 
 
+def test_create_user_rejects_missing_or_invalid_sex(client):
+    response = client.post(
+        "/api/v1/users",
+        json={
+            "username": "invalid-sex-user",
+            "locale": "zh-CN",
+            "region_code": "HK",
+            "birth_year": "1990",
+            "sex": "",
+            "conditions": [],
+            "medications": [],
+            "allergies": [],
+        },
+    )
+    assert response.status_code == 422
+    assert "male/female" in response.text
+
+
 def test_chat_flow_and_session_history(client):
     _configure_model(client)
     _mock_model_success(client)
@@ -104,6 +122,8 @@ def test_chat_flow_and_session_history(client):
     data1 = first.json()
     assert data1["answer"]["risk_level"] in {"low", "medium", "high", "emergency"}
     assert data1["answer"]["stage"] in {"intake", "conclusion"}
+    if data1["answer"]["stage"] == "conclusion":
+        assert isinstance(data1["answer"].get("advice_sections"), dict)
     assert data1["meta"]["session_id"]
 
     session_id = data1["meta"]["session_id"]
@@ -173,6 +193,9 @@ def test_chat_with_user_id_writes_sessions_and_graph(client):
     assert response.status_code == 200
     data = response.json()
     assert data["meta"]["user_id"] == user["id"]
+    if data["answer"]["stage"] == "conclusion":
+        assert isinstance(data["answer"].get("advice_sections"), dict)
+        assert data["answer"]["advice_sections"]["monitoring_guidance"] is not None
 
     sessions = client.get(f"/api/v1/users/{user['id']}/sessions")
     assert sessions.status_code == 200
@@ -188,6 +211,85 @@ def test_chat_with_user_id_writes_sessions_and_graph(client):
     assert len(graph_data["summary_bundle"]["recent_journey"]) >= 1
     assert graph_data["summary_bundle"]["recent_journey"][0]["is_current_session"] is True
     assert isinstance(graph_data["summary_bundle"]["risk_signals"], list)
+    if data["answer"]["stage"] == "conclusion":
+        assert len(graph_data["summary_bundle"]["risk_signals"]) >= 1
+
+
+def test_chat_rejects_user_without_sex(client):
+    imported = client.post(
+        "/api/v1/users/import-legacy",
+        json={
+            "profiles": [
+                {
+                    "username": "legacy-no-sex",
+                    "locale": "zh-CN",
+                    "region_code": "HK",
+                    "birth_year": "1988",
+                    "sex": "",
+                    "conditions": [],
+                    "medications": [],
+                    "allergies": [],
+                }
+            ]
+        },
+    )
+    assert imported.status_code == 200
+    user = imported.json()["users"][0]
+
+    response = client.post(
+        "/api/v1/chat",
+        json={
+            "user_id": user["id"],
+            "device_id": "device-no-sex",
+            "locale": "zh-CN",
+            "region_code": "HK",
+            "message": "我这两天咳嗽",
+        },
+    )
+    assert response.status_code == 422
+    assert "sex is required" in response.text.lower()
+
+
+def test_male_user_response_removes_menstruation_questions(client):
+    _configure_model(client)
+    user = _create_user(client, "male-safe-user")
+    client.patch(f"/api/v1/users/{user['id']}", json={"sex": "男"})
+
+    def mismatched_generate(messages, locale):
+        del messages, locale
+        return ModelResult(
+            content=json.dumps(
+                {
+                    "summary": "我先确认一下最近一次月经和是否怀孕。",
+                    "risk_level": "medium",
+                    "next_steps": [],
+                    "emergency_guidance": None,
+                    "disclaimer": "本回答仅用于健康信息参考，不能替代医生诊疗。",
+                    "stage": "intake",
+                    "follow_up_questions": ["最近一次月经是什么时候？", "有没有怀孕可能？"],
+                },
+                ensure_ascii=False,
+            ),
+            model=HTTP_MODEL_NAME,
+        )
+
+    client.app.state.model_adapter.generate = mismatched_generate
+
+    response = client.post(
+        "/api/v1/chat",
+        json={
+            "user_id": user["id"],
+            "device_id": "device-male-safe-user",
+            "locale": "zh-CN",
+            "region_code": "HK",
+            "message": "我最近咳嗽和发烧",
+        },
+    )
+    assert response.status_code == 200
+    data = response.json()["answer"]
+    assert data["stage"] == "intake"
+    assert "月经" not in data["summary"]
+    assert all("月经" not in item and "怀孕" not in item for item in data["follow_up_questions"])
 
 
 def test_intake_chat_does_not_write_risk_signal_to_graph(client):
@@ -226,6 +328,7 @@ def test_intake_chat_does_not_write_risk_signal_to_graph(client):
     )
     assert response.status_code == 200
     assert response.json()["answer"]["stage"] == "intake"
+    assert response.json()["answer"]["advice_sections"] is None
 
     graph = client.get(f"/api/v1/users/{user['id']}/graph")
     assert graph.status_code == 200
@@ -442,6 +545,8 @@ def test_emergency_triage(client):
     assert data["answer"]["risk_level"] == "emergency"
     assert data["answer"]["stage"] == "conclusion"
     assert "911" in data["answer"]["emergency_guidance"]
+    assert "visit_guidance" in data["answer"]["advice_sections"]
+    assert data["answer"]["advice_sections"]["exercise_guidance"] is None
 
 
 def test_delete_session(client):
@@ -492,6 +597,108 @@ def test_delete_session_removes_graph_subtree(client):
     graph_after = client.get(f"/api/v1/users/{user['id']}/graph")
     assert graph_after.status_code == 200
     assert not any(node["node_type"] == "session" and node["label"] == session_id for node in graph_after.json()["nodes"])
+    assert all(item["session_id"] != session_id for item in graph_after.json()["summary_bundle"]["recent_journey"])
+    assert all(item["session_id"] != session_id for item in graph_after.json()["summary_bundle"]["risk_signals"])
+
+
+def test_export_report_excludes_deleted_sessions(client):
+    _configure_model(client)
+    _mock_model_success(client)
+    user = _create_user(client, "delete-export-user")
+
+    first = client.post(
+        "/api/v1/chat",
+        json={
+            "user_id": user["id"],
+            "device_id": "device-delete-export-user",
+            "locale": "zh-CN",
+            "region_code": "HK",
+            "message": "第一段历史：我昨天发烧咳嗽",
+        },
+    )
+    assert first.status_code == 200
+    first_session_id = first.json()["meta"]["session_id"]
+
+    second = client.post(
+        "/api/v1/chat",
+        json={
+            "user_id": user["id"],
+            "device_id": "device-delete-export-user-2",
+            "locale": "zh-CN",
+            "region_code": "HK",
+            "message": "第二段历史：我今天腹泻腹痛",
+        },
+    )
+    assert second.status_code == 200
+    second_session_id = second.json()["meta"]["session_id"]
+
+    deleted = client.delete(f"/api/v1/sessions/{first_session_id}")
+    assert deleted.status_code == 200
+
+    exported = client.get(f"/api/v1/users/{user['id']}/export?format=markdown")
+    assert exported.status_code == 200
+    body = exported.text
+    assert first_session_id not in body
+    assert "第一段历史" not in body
+    assert second_session_id in body
+    assert "第二段历史" in body
+
+
+def test_graph_reconcile_backfills_history_for_existing_sessions(client):
+    _configure_model(client)
+    _mock_model_success(client)
+    user = _create_user(client, "reconcile-user")
+
+    payload = {
+        "user_id": user["id"],
+        "device_id": "device-reconcile-user",
+        "locale": "zh-CN",
+        "region_code": "HK",
+        "message": "我最近发烧、咳嗽，晚上更明显",
+    }
+    session_id = None
+    final_data = None
+    for idx in range(3):
+        if session_id:
+            payload["session_id"] = session_id
+            payload["message"] = "补充一点：现在还是咳嗽，晚上更明显。"
+        response = client.post("/api/v1/chat", json=payload)
+        assert response.status_code == 200
+        final_data = response.json()
+        session_id = final_data["meta"]["session_id"]
+
+    assert final_data is not None
+    assert final_data["answer"]["stage"] == "conclusion"
+
+    with client.app.state.session_factory() as db:
+        from sqlalchemy import delete, select
+
+        from app.models import UserGraphEdgeRecord, UserGraphNodeRecord
+
+        node_ids = {
+            node.id
+            for node in db.execute(
+                select(UserGraphNodeRecord).where(UserGraphNodeRecord.user_id == user["id"])
+            ).scalars()
+            if (node.node_type == "session" and node.label == session_id)
+            or str((node.payload or {}).get("session_id") or "") == session_id
+        }
+        if node_ids:
+            db.execute(
+                delete(UserGraphEdgeRecord).where(
+                    UserGraphEdgeRecord.user_id == user["id"],
+                    (UserGraphEdgeRecord.from_node_id.in_(node_ids)) | (UserGraphEdgeRecord.to_node_id.in_(node_ids)),
+                )
+            )
+            db.execute(delete(UserGraphNodeRecord).where(UserGraphNodeRecord.id.in_(node_ids)))
+            db.commit()
+
+    graph = client.get(f"/api/v1/users/{user['id']}/graph")
+    assert graph.status_code == 200
+    payload = graph.json()
+    assert any(node["node_type"] == "session" and node["label"] == session_id for node in payload["nodes"])
+    assert len(payload["summary_bundle"]["recent_journey"]) >= 1
+    assert len(payload["summary_bundle"]["risk_signals"]) >= 1
 
 
 def test_triage_progresses_from_intake_to_conclusion_by_round(client):
@@ -546,3 +753,4 @@ def test_triage_progresses_from_intake_to_conclusion_by_round(client):
     # 第5轮强制进入结论阶段，不再停留在 intake
     assert data["answer"]["stage"] == "conclusion"
     assert len(data["answer"]["next_steps"]) >= 1
+    assert isinstance(data["answer"]["advice_sections"], dict)

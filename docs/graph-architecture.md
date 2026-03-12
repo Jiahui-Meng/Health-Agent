@@ -258,6 +258,30 @@ In practice:
 - summary views are derived on read
 - deleted sessions are physically removed from the session subtree
 
+## 11. Graph and Prompt Guardrails
+
+The graph is not only used for UI summaries. User-level profile fields also feed prompt guardrails.
+
+Current prompt guardrail inputs include:
+
+- `sex`
+- `birth_year`
+- `region_code`
+
+These are normalized in:
+
+- `backend/app/services/profile_guardrails.py`
+
+And then injected into prompt construction through:
+
+- `backend/app/services/prompt_builder.py`
+
+This is how the runtime keeps the model aligned with:
+
+- sex-specific question constraints
+- age-group caution rules
+- region-aware emergency wording
+
 This is not full graph versioning. It is closer to:
 
 - event retention for valid sessions

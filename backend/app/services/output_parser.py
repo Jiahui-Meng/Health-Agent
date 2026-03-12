@@ -19,6 +19,7 @@ def parse_model_json(raw: str, locale: str) -> dict:
             "disclaimer": "",
             "stage": "conclusion",
             "follow_up_questions": [],
+            "advice_sections": None,
         }
 
     stage = str(data.get("stage", "conclusion")).lower()
@@ -56,6 +57,10 @@ def parse_model_json(raw: str, locale: str) -> dict:
                 "Which symptom is bothering you the most right now, and how severe is it on a 0-10 scale?",
             ]
 
+    advice_sections = _normalize_advice_sections(data.get("advice_sections"))
+    if stage == "intake":
+        advice_sections = None
+
     risk_level = str(data.get("risk_level", "medium")).lower()
     if risk_level not in {"low", "medium", "high", "emergency"}:
         risk_level = "medium"
@@ -87,4 +92,33 @@ def parse_model_json(raw: str, locale: str) -> dict:
         "disclaimer": str(disclaimer),
         "stage": stage,
         "follow_up_questions": follow_up_questions if stage == "intake" else None,
+        "advice_sections": advice_sections,
     }
+
+
+def _normalize_advice_sections(raw: object) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+
+    normalized: dict[str, dict] = {}
+    for key in [
+        "medication_guidance",
+        "visit_guidance",
+        "rest_guidance",
+        "diet_guidance",
+        "exercise_guidance",
+        "monitoring_guidance",
+    ]:
+        section = raw.get(key)
+        if not isinstance(section, dict):
+            continue
+        title = str(section.get("title") or "").strip()
+        items = [str(item).strip() for item in (section.get("items") or []) if str(item).strip()]
+        if not title or not items:
+            continue
+        normalized[key] = {
+            "title": title,
+            "items": items[:4],
+            "priority": "primary" if str(section.get("priority") or "") == "primary" else "secondary",
+        }
+    return normalized or None

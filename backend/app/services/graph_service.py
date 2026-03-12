@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import json
 import re
 from typing import Any
 
 from sqlalchemy import delete, desc, select
 from sqlalchemy.orm import Session
 
-from ..models import SessionRecord, UserGraphEdgeRecord, UserGraphNodeRecord, UserRecord
+from ..models import MessageRecord, SessionRecord, UserGraphEdgeRecord, UserGraphNodeRecord, UserRecord
 
 PERSISTENT_NODE_TYPES = {
     "condition": "HAS_CONDITION",
@@ -24,6 +25,13 @@ SYMPTOM_PATTERNS = [
     ("呼吸困难", r"呼吸困难|气短|shortness of breath|breathing trouble"),
     ("头痛", r"头痛|headache"),
     ("腹痛", r"腹痛|肚子痛|abdominal pain|stomach pain"),
+    ("流鼻涕", r"流鼻涕|鼻塞|runny nose|nasal congestion"),
+    ("恶心", r"恶心|nausea"),
+    ("呕吐", r"呕吐|vomit|vomiting"),
+    ("腹泻", r"腹泻|拉肚子|diarrhea"),
+    ("乏力", r"乏力|疲劳|fatigue|tired"),
+    ("头晕", r"头晕|眩晕|dizzy|dizziness"),
+    ("皮疹", r"皮疹|rash"),
 ]
 
 TIMELINE_PATTERNS = [
@@ -33,6 +41,10 @@ TIMELINE_PATTERNS = [
     ("今早", r"今早|今天早上|this morning"),
     ("持续", r"持续|仍然|一直|for \d+"),
     ("加重", r"加重|更严重|worse|worsening"),
+    ("突然", r"突然|sudden|suddenly"),
+    ("反复", r"反复|recurrent|comes and goes"),
+    ("缓解", r"缓解|好转|improving|better"),
+    ("近几天", r"这两天|这几天|recent days|past few days"),
 ]
 
 
@@ -98,19 +110,18 @@ def mark_user_active(db: Session, user: UserRecord) -> UserRecord:
 
 
 def get_graph_bundle(db: Session, user_id: str, current_session_id: str | None = None) -> GraphContextBundle:
+    reconcile_user_graph_from_sessions(db, user_id)
     user = db.get(UserRecord, user_id)
-    session_ids_by_recency = [
-        session.id
-        for session in (
-            db.execute(
-                select(SessionRecord)
-                .where(SessionRecord.user_id == user_id)
-                .order_by(SessionRecord.updated_at.desc(), SessionRecord.created_at.desc())
-            )
-            .scalars()
-            .all()
+    sessions_by_recency = (
+        db.execute(
+            select(SessionRecord)
+            .where(SessionRecord.user_id == user_id)
+            .order_by(SessionRecord.updated_at.desc(), SessionRecord.created_at.desc())
         )
-    ]
+        .scalars()
+        .all()
+    )
+    session_ids_by_recency = [session.id for session in sessions_by_recency]
     nodes = (
         db.execute(
             select(UserGraphNodeRecord)
@@ -132,7 +143,8 @@ def get_graph_bundle(db: Session, user_id: str, current_session_id: str | None =
         for node in timeline_nodes[:10]
     ]
     effective_session_id = current_session_id or (session_ids_by_recency[0] if session_ids_by_recency else None)
-    recent_journey = _build_recent_journey(nodes, effective_session_id, session_ids_by_recency)
+    fallback_journey = _build_session_fallback_cards(db, sessions_by_recency)
+    recent_journey = _build_recent_journey(nodes, effective_session_id, session_ids_by_recency, fallback_journey)
     risk_signals = _build_risk_signal_summary(nodes, effective_session_id, session_ids_by_recency)
     summary_labels = [node.label for node in nodes if node.node_type == "summary"][:5]
 
@@ -152,6 +164,7 @@ def get_graph_bundle(db: Session, user_id: str, current_session_id: str | None =
 
 
 def get_graph_payload(db: Session, user_id: str) -> dict[str, Any]:
+    reconcile_user_graph_from_sessions(db, user_id)
     session_ids = {
         session.id
         for session in (
@@ -260,8 +273,11 @@ def upsert_session_graph(
 
     if answer.get("stage") == "conclusion":
         risk_labels = list(dict.fromkeys(risk_triggers))
-        if answer.get("risk_level") in {"high", "emergency"} and answer.get("risk_level") not in risk_labels:
-            risk_labels.append(str(answer["risk_level"]))
+        summary_label = str(answer.get("summary") or "").strip()
+        if summary_label:
+            risk_labels.append(summary_label[:120])
+        if str(answer.get("risk_level") or "") not in risk_labels:
+            risk_labels.append(str(answer.get("risk_level") or "medium"))
         for label in risk_labels:
             risk_node = _get_or_create_node(
                 db,
@@ -284,6 +300,160 @@ def upsert_session_graph(
             source="summary",
         )
         _ensure_edge(db, user.id, session_node.id, summary_node.id, "SUMMARIZED_AS")
+
+
+def reconcile_user_graph_from_sessions(db: Session, user_id: str) -> None:
+    user = db.get(UserRecord, user_id)
+    if not user:
+        return
+
+    root_node = _ensure_user_root_node(db, user)
+    sessions = (
+        db.execute(select(SessionRecord).where(SessionRecord.user_id == user_id).order_by(SessionRecord.created_at.asc()))
+        .scalars()
+        .all()
+    )
+    for session in sessions:
+        rebuild_session_graph_from_history(db, user_id, session.id, root_node_id=root_node.id)
+    _prune_orphan_symptom_nodes(db, user_id)
+    db.flush()
+
+
+def rebuild_session_graph_from_history(db: Session, user_id: str, session_id: str, *, root_node_id: str | None = None) -> None:
+    session = db.get(SessionRecord, session_id)
+    if not session or session.user_id != user_id:
+        return
+
+    _delete_session_derived_nodes(db, user_id, session_id)
+    root_node = (
+        db.execute(
+            select(UserGraphNodeRecord).where(
+                UserGraphNodeRecord.user_id == user_id,
+                UserGraphNodeRecord.node_type == "user",
+            )
+        )
+        .scalars()
+        .first()
+        if root_node_id is None
+        else None
+    )
+    if root_node_id is None:
+        if not root_node:
+            user = db.get(UserRecord, user_id)
+            if not user:
+                return
+            root_node = _ensure_user_root_node(db, user)
+        root_node_id = root_node.id
+
+    session_node = _ensure_session_node(db, user_id, session_id)
+    _ensure_edge(db, user_id, root_node_id, session_node.id, "HAS_SESSION")
+
+    messages = (
+        db.execute(
+            select(MessageRecord)
+            .where(MessageRecord.session_id == session_id)
+            .order_by(MessageRecord.created_at.asc(), MessageRecord.id.asc())
+        )
+        .scalars()
+        .all()
+    )
+
+    latest_user_message = ""
+    latest_conclusion: dict[str, Any] | None = None
+    risk_triggers: list[str] = []
+
+    for message in messages:
+        if message.role == "user":
+            latest_user_message = message.content
+            _materialize_user_message_nodes(
+                db,
+                user_id=user_id,
+                session_id=session_id,
+                session_node_id=session_node.id,
+                locale=session.locale,
+                text=message.content,
+            )
+        elif message.role == "assistant":
+            parsed = _parse_assistant_json(message.content)
+            if not parsed:
+                continue
+            if str(parsed.get("stage") or "") == "conclusion":
+                latest_conclusion = parsed
+                risk_triggers = _extract_readable_risk_labels(parsed)
+                _materialize_assistant_summary_nodes(
+                    db,
+                    user_id=user_id,
+                    session_id=session_id,
+                    session_node_id=session_node.id,
+                    text=" ".join(
+                        [
+                            str(parsed.get("summary") or ""),
+                            " ".join(str(item) for item in (parsed.get("next_steps") or [])),
+                        ]
+                    ).strip(),
+                )
+
+    if latest_conclusion:
+        risk_level = str(latest_conclusion.get("risk_level") or session.latest_risk or "medium")
+        labels = risk_triggers or [str(latest_conclusion.get("summary") or "").strip()[:120] or risk_level]
+        for label in labels[:2]:
+            risk_node = _get_or_create_node(
+                db,
+                user_id,
+                "risk_signal",
+                label,
+                {"session_id": session_id, "risk_level": risk_level},
+                source="summary",
+            )
+            _ensure_edge(db, user_id, session_node.id, risk_node.id, "HAS_RISK_SIGNAL")
+
+        summary = str(latest_conclusion.get("summary") or "").strip() or session.summary.strip() or latest_user_message[:120]
+        if summary:
+            summary_node = _get_or_create_node(
+                db,
+                user_id,
+                "summary",
+                summary[:255],
+                {"session_id": session_id, "stage": "conclusion", "risk_level": risk_level},
+                source="summary",
+            )
+            _ensure_edge(db, user_id, session_node.id, summary_node.id, "SUMMARIZED_AS")
+    elif session.summary.strip():
+        summary_node = _get_or_create_node(
+            db,
+            user_id,
+            "summary",
+            session.summary.strip()[:255],
+            {"session_id": session_id, "stage": session.triage_stage or "intake", "risk_level": session.latest_risk or "low"},
+            source="summary",
+        )
+        _ensure_edge(db, user_id, session_node.id, summary_node.id, "SUMMARIZED_AS")
+
+
+def _delete_session_derived_nodes(db: Session, user_id: str, session_id: str) -> None:
+    nodes = (
+        db.execute(select(UserGraphNodeRecord).where(UserGraphNodeRecord.user_id == user_id))
+        .scalars()
+        .all()
+    )
+    removable_ids = {
+        node.id
+        for node in nodes
+        if (
+            node.node_type == "session" and node.label == session_id
+        )
+        or str((node.payload or {}).get("session_id") or "") == session_id
+    }
+    if not removable_ids:
+        return
+    db.execute(
+        delete(UserGraphEdgeRecord).where(
+            UserGraphEdgeRecord.user_id == user_id,
+            (UserGraphEdgeRecord.from_node_id.in_(removable_ids)) | (UserGraphEdgeRecord.to_node_id.in_(removable_ids)),
+        )
+    )
+    db.execute(delete(UserGraphNodeRecord).where(UserGraphNodeRecord.id.in_(removable_ids)))
+    db.flush()
 
 
 def delete_session_graph_subtree(db: Session, user_id: str, session_id: str) -> None:
@@ -551,6 +721,7 @@ def _build_recent_journey(
     nodes: list[UserGraphNodeRecord],
     current_session_id: str | None,
     session_ids_by_recency: list[str],
+    fallback_cards: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     session_rank = {session_id: index for index, session_id in enumerate(session_ids_by_recency)}
     grouped: dict[str, dict[str, Any]] = {}
@@ -604,6 +775,26 @@ def _build_recent_journey(
                 "severity_hint": "medium" if any(marker in {"加重", "持续"} for marker in markers) else "low",
                 "_session_rank": session_rank.get(session_id, 999),
                 "_sort_epoch": group["sort_time"].timestamp(),
+            }
+        )
+
+    existing_sessions = {item["session_id"] for item in journey}
+    for session_id in session_ids_by_recency:
+        if session_id in existing_sessions:
+            continue
+        fallback = fallback_cards.get(session_id)
+        if not fallback:
+            continue
+        journey.append(
+            {
+                "title": fallback["title"],
+                "detail": fallback["detail"],
+                "session_id": session_id,
+                "is_current_session": bool(current_session_id and session_id == current_session_id),
+                "sort_time": fallback["sort_time"],
+                "severity_hint": fallback["severity_hint"],
+                "_session_rank": session_rank.get(session_id, 999),
+                "_sort_epoch": fallback["_sort_epoch"],
             }
         )
 
@@ -663,6 +854,46 @@ def _build_risk_signal_summary(
     return [{key: value for key, value in item.items() if not key.startswith("_")} for item in items[:6]]
 
 
+def _build_session_fallback_cards(db: Session, sessions_by_recency: list[SessionRecord]) -> dict[str, dict[str, Any]]:
+    if not sessions_by_recency:
+        return {}
+    session_ids = [session.id for session in sessions_by_recency]
+    messages = (
+        db.execute(
+            select(MessageRecord)
+            .where(MessageRecord.session_id.in_(session_ids))
+            .order_by(MessageRecord.created_at.asc(), MessageRecord.id.asc())
+        )
+        .scalars()
+        .all()
+    )
+    grouped: dict[str, dict[str, str]] = {
+        session.id: {"latest_user": "", "latest_conclusion": ""}
+        for session in sessions_by_recency
+    }
+    for message in messages:
+        if message.role == "user":
+            grouped.setdefault(message.session_id, {})["latest_user"] = message.content.strip()
+        elif message.role == "assistant":
+            parsed = _parse_assistant_json(message.content)
+            if parsed and str(parsed.get("stage") or "") == "conclusion":
+                grouped.setdefault(message.session_id, {})["latest_conclusion"] = str(parsed.get("summary") or "").strip()
+
+    cards: dict[str, dict[str, Any]] = {}
+    for session in sessions_by_recency:
+        session_group = grouped.get(session.id, {})
+        title_source = session_group.get("latest_conclusion") or session_group.get("latest_user") or session.summary or session.id
+        detail_source = session_group.get("latest_user") or session_group.get("latest_conclusion") or session.summary or title_source
+        cards[session.id] = {
+            "title": title_source[:80].strip(),
+            "detail": detail_source[:120].strip(),
+            "sort_time": (session.updated_at or session.created_at or datetime.utcnow()).isoformat(),
+            "severity_hint": session.latest_risk or "low",
+            "_sort_epoch": (session.updated_at or session.created_at or datetime.utcnow()).timestamp(),
+        }
+    return cards
+
+
 def _split_symptom_event_label(label: str, fallback_message: str) -> tuple[str, str]:
     if ":" not in label:
         return label.strip(), fallback_message.strip()
@@ -685,3 +916,97 @@ def _extract_labels(text: str, patterns: list[tuple[str, str]]) -> list[str]:
         if re.search(pattern, text, flags=re.IGNORECASE) or re.search(pattern, lowered, flags=re.IGNORECASE):
             hits.append(label)
     return list(dict.fromkeys(hits))
+
+
+def _materialize_user_message_nodes(
+    db: Session,
+    *,
+    user_id: str,
+    session_id: str,
+    session_node_id: str,
+    locale: str,
+    text: str,
+) -> None:
+    symptom_labels = _extract_labels(text, SYMPTOM_PATTERNS)
+    for label in symptom_labels:
+        symptom_node = _get_or_create_node(db, user_id, "symptom", label, {"locale": locale}, source="extracted")
+        _ensure_edge(db, user_id, session_node_id, symptom_node.id, "REPORTED_SYMPTOM")
+        event_node = _get_or_create_node(
+            db,
+            user_id,
+            "symptom_event",
+            f"{label}:{text[:80]}",
+            {"session_id": session_id, "message": text, "locale": locale},
+            source="chat",
+        )
+        _ensure_edge(db, user_id, symptom_node.id, event_node.id, "EVOLVED_TO")
+        _ensure_edge(db, user_id, session_node_id, event_node.id, "REPORTED_SYMPTOM")
+
+    for label in _extract_labels(text, TIMELINE_PATTERNS):
+        marker_node = _get_or_create_node(
+            db,
+            user_id,
+            "timeline_marker",
+            label,
+            {"session_id": session_id, "message": text},
+            source="chat",
+        )
+        _ensure_edge(db, user_id, session_node_id, marker_node.id, "OCCURRED_AT")
+
+
+def _materialize_assistant_summary_nodes(
+    db: Session,
+    *,
+    user_id: str,
+    session_id: str,
+    session_node_id: str,
+    text: str,
+) -> None:
+    if not text:
+        return
+    for label in _extract_labels(text, SYMPTOM_PATTERNS):
+        symptom_node = _get_or_create_node(db, user_id, "symptom", label, {"locale": ""}, source="extracted")
+        _ensure_edge(db, user_id, session_node_id, symptom_node.id, "REPORTED_SYMPTOM")
+        event_node = _get_or_create_node(
+            db,
+            user_id,
+            "symptom_event",
+            f"{label}:{text[:80]}",
+            {"session_id": session_id, "message": text},
+            source="summary",
+        )
+        _ensure_edge(db, user_id, symptom_node.id, event_node.id, "EVOLVED_TO")
+        _ensure_edge(db, user_id, session_node_id, event_node.id, "REPORTED_SYMPTOM")
+
+    for label in _extract_labels(text, TIMELINE_PATTERNS):
+        marker_node = _get_or_create_node(
+            db,
+            user_id,
+            "timeline_marker",
+            label,
+            {"session_id": session_id, "message": text},
+            source="summary",
+        )
+        _ensure_edge(db, user_id, session_node_id, marker_node.id, "OCCURRED_AT")
+
+
+def _parse_assistant_json(content: str) -> dict[str, Any] | None:
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _extract_readable_risk_labels(answer: dict[str, Any]) -> list[str]:
+    labels: list[str] = []
+    emergency = str(answer.get("emergency_guidance") or "").strip()
+    if emergency:
+        labels.append(emergency[:120])
+    summary = str(answer.get("summary") or "").strip()
+    if summary:
+        labels.append(summary[:120])
+    risk_level = str(answer.get("risk_level") or "").strip().lower()
+    if risk_level and risk_level not in labels:
+        labels.append(risk_level)
+    return list(dict.fromkeys([label for label in labels if label]))[:2]

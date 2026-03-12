@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react'
 import {
+  AdviceSection,
   ChatResponse,
   HealthProfile,
   MessageItem,
@@ -23,6 +24,7 @@ import {
   startOAuthLogin,
   updateUser,
 } from './lib/api'
+import UserGraphPage from './components/UserGraphPage'
 
 type ParsedAssistant = ChatResponse['answer']
 type ClientStatus = 'sending' | 'failed'
@@ -44,12 +46,23 @@ type GraphRiskCard = {
   sort_time: string
 }
 
+type AdviceSectionEntry = {
+  key:
+    | 'visit_guidance'
+    | 'medication_guidance'
+    | 'rest_guidance'
+    | 'diet_guidance'
+    | 'exercise_guidance'
+    | 'monitoring_guidance'
+  section: AdviceSection
+}
+
 type UserDraft = {
   username: string
   locale: string
   regionCode: string
   birthYear: string
-  sex: string
+  sex: 'male' | 'female' | ''
   conditionsText: string
   medicationsText: string
   allergiesText: string
@@ -65,6 +78,8 @@ type LegacyLocalUserProfile = {
   medications: string[]
   allergies: string[]
 }
+
+type NormalizedSex = 'male' | 'female' | ''
 
 const BIGMODEL_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4'
 const BIGMODEL_DEFAULT_MODEL = 'glm-4.7-flash'
@@ -94,7 +109,11 @@ const UI_TEXT = {
     birthYear: '出生年份',
     birthYearPlaceholder: '例如 1990',
     sex: '性别',
-    sexPlaceholder: '例如 女',
+    sexPlaceholder: '请选择',
+    sexMale: '男 / Male',
+    sexFemale: '女 / Female',
+    sexRequired: '性别为必填项，未填写不能开始问诊。',
+    sexMissingBeforeChat: '请先完善当前用户的性别信息，再开始问诊。',
     conditions: '既往病史（逗号分隔）',
     conditionsPlaceholder: '哮喘, 糖尿病',
     medications: '当前用药（逗号分隔）',
@@ -106,6 +125,7 @@ const UI_TEXT = {
     modelApi: '模型 API',
     openSettings: '打开模型配置',
     exportReport: '导出报告',
+    viewGraph: '查看图谱',
     exporting: '导出中...',
     hide: '收起',
     edit: '编辑',
@@ -160,6 +180,23 @@ const UI_TEXT = {
     graphNoJourney: '暂无可展示的病程演化',
     graphNoRisk: '暂无重点风险信号',
     graphProfileHighlights: '档案概览',
+    graphPageTitle: '用户健康图谱',
+    graphPageSubtitle: '树状演示视图',
+    graphBack: '返回聊天',
+    graphFitView: '适配视图',
+    graphReset: '重置',
+    graphFilters: '筛选器',
+    graphNodeTypes: '节点类型',
+    graphSessionScope: '会话范围',
+    graphRiskScope: '风险范围',
+    graphSessionAll: '全部会话',
+    graphSessionCurrent: '当前会话',
+    graphSessionSelected: '指定会话',
+    graphRiskAll: '全部风险',
+    graphRiskHigh: '仅高风险/紧急',
+    graphRiskHideLow: '隐藏低风险',
+    graphDetails: '节点详情',
+    graphNoSelection: '点击节点以查看详情',
     risk: {
       low: '低风险',
       medium: '中风险',
@@ -181,7 +218,11 @@ const UI_TEXT = {
     birthYear: 'Birth Year',
     birthYearPlaceholder: 'e.g. 1990',
     sex: 'Sex',
-    sexPlaceholder: 'e.g. female',
+    sexPlaceholder: 'Select',
+    sexMale: 'Male',
+    sexFemale: 'Female',
+    sexRequired: 'Sex is required before chat.',
+    sexMissingBeforeChat: 'Please complete the current user sex field before starting chat.',
     conditions: 'Conditions (comma)',
     conditionsPlaceholder: 'asthma, diabetes',
     medications: 'Medications (comma)',
@@ -193,6 +234,7 @@ const UI_TEXT = {
     modelApi: 'Model API',
     openSettings: 'Open model settings',
     exportReport: 'Export report',
+    viewGraph: 'View Graph',
     exporting: 'Exporting...',
     hide: 'Hide',
     edit: 'Edit',
@@ -247,6 +289,23 @@ const UI_TEXT = {
     graphNoJourney: 'No symptom journey available yet.',
     graphNoRisk: 'No notable risk signals yet.',
     graphProfileHighlights: 'Profile Highlights',
+    graphPageTitle: 'User Health Graph',
+    graphPageSubtitle: 'Tree Demo View',
+    graphBack: 'Back to Chat',
+    graphFitView: 'Fit View',
+    graphReset: 'Reset',
+    graphFilters: 'Filters',
+    graphNodeTypes: 'Node Types',
+    graphSessionScope: 'Session Scope',
+    graphRiskScope: 'Risk Scope',
+    graphSessionAll: 'All Sessions',
+    graphSessionCurrent: 'Current Session',
+    graphSessionSelected: 'Selected Session',
+    graphRiskAll: 'All Risk',
+    graphRiskHigh: 'Only High / Emergency',
+    graphRiskHideLow: 'Hide Low',
+    graphDetails: 'Node Details',
+    graphNoSelection: 'Select a node to inspect details',
     risk: {
       low: 'LOW',
       medium: 'MEDIUM',
@@ -290,6 +349,22 @@ function buildDeviceId(username: string): string {
     .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '_')
     .replace(/^_+|_+$/g, '')
   return `device_${slug || 'local_user'}`
+}
+
+function normalizeSexValue(value: string): NormalizedSex {
+  const raw = String(value || '')
+    .trim()
+    .toLowerCase()
+  if (raw === 'male' || raw === 'man' || raw === 'm' || raw === '男') return 'male'
+  if (raw === 'female' || raw === 'woman' || raw === 'f' || raw === '女') return 'female'
+  return ''
+}
+
+function formatSexLabel(value: string, locale: string, t: (typeof UI_TEXT)['zh'] | (typeof UI_TEXT)['en']) {
+  const normalized = normalizeSexValue(value)
+  if (normalized === 'male') return t.sexMale
+  if (normalized === 'female') return t.sexFemale
+  return locale.startsWith('zh') ? '未填写' : 'Not set'
 }
 
 function isRiskObject(
@@ -341,6 +416,23 @@ function normalizeRiskSignals(userGraph: UserGraphResponse | null): GraphRiskCar
       sort_time: '',
     }
   })
+}
+
+function getOrderedAdviceSections(parsed: ParsedAssistant): AdviceSectionEntry[] {
+  const sections = parsed.advice_sections
+  if (!sections) return []
+  const orderedKeys = [
+    'visit_guidance',
+    'medication_guidance',
+    'rest_guidance',
+    'diet_guidance',
+    'exercise_guidance',
+    'monitoring_guidance',
+  ] as const
+  const entries = orderedKeys
+    .map((key) => ({ key, section: sections[key] }))
+    .filter((item) => Boolean(item.section && item.section.items?.length))
+  return entries as AdviceSectionEntry[]
 }
 
 function loadLegacyProfilesFromStorage(): { profiles: LegacyLocalUserProfile[]; activeUsername: string } {
@@ -396,7 +488,7 @@ function userToDraft(user: UserProfile): UserDraft {
     locale: user.locale,
     regionCode: user.region_code,
     birthYear: user.birth_year,
-    sex: user.sex,
+    sex: normalizeSexValue(user.sex),
     conditionsText: toCsv(user.conditions),
     medicationsText: toCsv(user.medications),
     allergiesText: toCsv(user.allergies),
@@ -409,7 +501,7 @@ function draftToPayload(draft: UserDraft): UserCreateRequest {
     locale: draft.locale,
     region_code: draft.regionCode,
     birth_year: draft.birthYear.trim(),
-    sex: draft.sex.trim(),
+    sex: normalizeSexValue(draft.sex) as UserCreateRequest['sex'],
     conditions: toList(draft.conditionsText),
     medications: toList(draft.medicationsText),
     allergies: toList(draft.allergiesText),
@@ -417,6 +509,7 @@ function draftToPayload(draft: UserDraft): UserCreateRequest {
 }
 
 export default function App() {
+  const [pageMode, setPageMode] = useState<'chat' | 'graph'>('chat')
   const [sessionId, setSessionId] = useState<string | undefined>(undefined)
   const [users, setUsers] = useState<UserProfile[]>([])
   const [activeUserId, setActiveUserId] = useState('')
@@ -503,7 +596,7 @@ export default function App() {
                   locale: profile.locale,
                   region_code: profile.regionCode,
                   birth_year: profile.birthYear,
-                  sex: profile.sex,
+                  sex: normalizeSexValue(profile.sex) as UserCreateRequest['sex'],
                   conditions: profile.conditions,
                   medications: profile.medications,
                   allergies: profile.allergies,
@@ -571,6 +664,16 @@ export default function App() {
 
     syncGraph().catch((e) => setError((e as Error).message))
   }, [activeUserId, sessionId])
+
+  useEffect(() => {
+    if (!activeUser || showUserModal) return
+    if (!normalizeSexValue(activeUser.sex)) {
+      setIsEditingUser(true)
+      setUserError(t.sexRequired)
+      setUserDraft(userToDraft(activeUser))
+      setShowUserModal(true)
+    }
+  }, [activeUser, showUserModal, t.sexRequired])
 
   async function refreshUsers() {
     const data = await getUsers()
@@ -680,6 +783,10 @@ export default function App() {
       setUserError(t.usernameRequired)
       return
     }
+    if (!payload.sex) {
+      setUserError(t.sexRequired)
+      return
+    }
     try {
       let saved: UserProfile
       if (isEditingUser && activeUser) {
@@ -767,6 +874,14 @@ export default function App() {
     event.preventDefault()
     const userText = input.trim()
     if (!userText || !modelConfigured || !activeUser) return
+    if (!normalizeSexValue(activeUser.sex)) {
+      setError(t.sexMissingBeforeChat)
+      setIsEditingUser(true)
+      setUserError(t.sexRequired)
+      setUserDraft(userToDraft(activeUser))
+      setShowUserModal(true)
+      return
+    }
 
     setError('')
     const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -875,7 +990,40 @@ export default function App() {
         <p>{t.heroSubtitle}</p>
       </header>
 
-      <main className="layout">
+      <main className={pageMode === 'graph' && activeUser ? 'graph-main' : 'layout'}>
+        {pageMode === 'graph' && activeUser ? (
+          <UserGraphPage
+            activeUser={activeUser}
+            userGraph={userGraph}
+            sessions={sessions}
+            currentSessionId={sessionId}
+            locale={activeLocale}
+            onBack={() => setPageMode('chat')}
+            copy={{
+              title: t.graphPageTitle,
+              back: t.graphBack,
+              subtitle: t.graphPageSubtitle,
+              fitView: t.graphFitView,
+              reset: t.graphReset,
+              filters: t.graphFilters,
+              nodeTypes: t.graphNodeTypes,
+              sessionScope: t.graphSessionScope,
+              riskScope: t.graphRiskScope,
+              sessionAll: t.graphSessionAll,
+              sessionCurrent: t.graphSessionCurrent,
+              sessionSelected: t.graphSessionSelected,
+              riskAll: t.graphRiskAll,
+              riskHigh: t.graphRiskHigh,
+              riskHideLow: t.graphRiskHideLow,
+              details: t.graphDetails,
+              noSelection: t.graphNoSelection,
+              longTerm: t.graphLongTerm,
+              sessions: t.history,
+              viewGraph: t.viewGraph,
+            }}
+          />
+        ) : (
+          <>
         <aside className="panel left-panel">
           <h2>{t.userProfile}</h2>
 
@@ -899,6 +1047,9 @@ export default function App() {
                 <button type="button" onClick={openEditUserModal}>
                   {t.editUser}
                 </button>
+                <button type="button" onClick={() => setPageMode('graph')} disabled={!userGraph}>
+                  {t.viewGraph}
+                </button>
                 <button type="button" onClick={() => void onExportReport()} disabled={exportingReport}>
                   {exportingReport ? t.exporting : t.exportReport}
                 </button>
@@ -918,7 +1069,7 @@ export default function App() {
                 )}
                 {activeUser.sex && (
                   <p>
-                    {t.sex}: {activeUser.sex}
+                    {t.sex}: {formatSexLabel(activeUser.sex, activeLocale, t)}
                   </p>
                 )}
               </div>
@@ -994,6 +1145,9 @@ export default function App() {
             {messages.length === 0 && <p className="placeholder">{t.startPrompt}</p>}
             {messages.map((msg) => {
               const parsed = msg.role === 'assistant' ? parseAssistant(msg.content) : null
+              const adviceSections = parsed ? getOrderedAdviceSections(parsed) : []
+              const primaryAdvice = adviceSections.filter((item) => item.section.priority === 'primary')
+              const secondaryAdvice = adviceSections.filter((item) => item.section.priority !== 'primary')
               return (
                 <article
                   key={msg.id}
@@ -1019,11 +1173,41 @@ export default function App() {
                         </div>
                       ) : (
                         <>
-                          <ul>
-                            {parsed.next_steps.map((step, i) => (
-                              <li key={`${msg.id}-${i}`}>{step}</li>
-                            ))}
-                          </ul>
+                          {primaryAdvice.length > 0 && (
+                            <div className="advice-section-list">
+                              {primaryAdvice.map(({ key, section }) => (
+                                <section key={`${msg.id}-${key}`} className="advice-section advice-section-primary">
+                                  <h3>{section.title}</h3>
+                                  <ul>
+                                    {section.items.map((item, i) => (
+                                      <li key={`${msg.id}-${key}-${i}`}>{item}</li>
+                                    ))}
+                                  </ul>
+                                </section>
+                              ))}
+                            </div>
+                          )}
+                          {secondaryAdvice.length > 0 && (
+                            <div className="advice-section-list advice-section-list-secondary">
+                              {secondaryAdvice.map(({ key, section }) => (
+                                <section key={`${msg.id}-${key}`} className="advice-section advice-section-secondary">
+                                  <h3>{section.title}</h3>
+                                  <ul>
+                                    {section.items.map((item, i) => (
+                                      <li key={`${msg.id}-${key}-${i}`}>{item}</li>
+                                    ))}
+                                  </ul>
+                                </section>
+                              ))}
+                            </div>
+                          )}
+                          {adviceSections.length === 0 && (
+                            <ul>
+                              {parsed.next_steps.map((step, i) => (
+                                <li key={`${msg.id}-${i}`}>{step}</li>
+                              ))}
+                            </ul>
+                          )}
                           {parsed.emergency_guidance && <p className="emergency">{parsed.emergency_guidance}</p>}
                           <h3>{parsed.summary}</h3>
                           <div className="risk-tag" style={{ background: riskColor[parsed.risk_level] || '#495057' }}>
@@ -1089,6 +1273,8 @@ export default function App() {
             ))}
           </div>
         </aside>
+          </>
+        )}
       </main>
 
       {showUserModal && (
@@ -1139,11 +1325,16 @@ export default function App() {
               </label>
               <label>
                 {t.sex}
-                <input
+                <select
                   value={userDraft.sex}
-                  onChange={(e) => setUserDraft((prev) => ({ ...prev, sex: e.target.value }))}
-                  placeholder={t.sexPlaceholder}
-                />
+                  onChange={(e) =>
+                    setUserDraft((prev) => ({ ...prev, sex: normalizeSexValue(e.target.value) }))
+                  }
+                >
+                  <option value="">{t.sexPlaceholder}</option>
+                  <option value="male">{t.sexMale}</option>
+                  <option value="female">{t.sexFemale}</option>
+                </select>
               </label>
               <label>
                 {t.conditions}
