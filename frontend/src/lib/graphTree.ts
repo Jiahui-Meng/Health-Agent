@@ -8,9 +8,6 @@ export type GraphNodeKind =
   | 'session'
   | 'summary'
   | 'risk_signal'
-  | 'symptom_event'
-  | 'timeline_marker'
-  | 'symptom'
   | 'long_term'
 
 export type GraphFilterState = {
@@ -18,9 +15,6 @@ export type GraphFilterState = {
     session: boolean
     summary: boolean
     risk_signal: boolean
-    symptom_event: boolean
-    timeline_marker: boolean
-    symptom: boolean
     long_term: boolean
   }
   sessionMode: 'all' | 'current' | 'selected'
@@ -321,21 +315,12 @@ function buildSessionChildren(params: {
   const { sessionNodeId, sessionId, userGraph, filters, locale } = params
   const sessionItems: TreeItem[] = []
   const sessionScopedNodes = userGraph.nodes.filter((node) => String((node.payload || {}).session_id || '') === sessionId)
-  const directSymptomIds = new Set(
-    userGraph.edges
-      .filter((edge) => edge.from_node_id === sessionNodeId)
-      .map((edge) => edge.to_node_id),
-  )
-  const directSymptoms = userGraph.nodes.filter((node) => directSymptomIds.has(node.id) && node.node_type === 'symptom')
   const typedGroups = {
     summary: sessionScopedNodes.filter((node) => node.node_type === 'summary'),
     risk_signal: sessionScopedNodes.filter((node) => node.node_type === 'risk_signal').filter((node) => allowRisk(node, filters.riskMode)),
-    symptom_event: sessionScopedNodes.filter((node) => node.node_type === 'symptom_event'),
-    timeline_marker: sessionScopedNodes.filter((node) => node.node_type === 'timeline_marker'),
-    symptom: directSymptoms,
   }
 
-  const orderedTypes: Array<keyof typeof typedGroups> = ['summary', 'risk_signal', 'symptom_event', 'timeline_marker', 'symptom']
+  const orderedTypes: Array<keyof typeof typedGroups> = ['summary', 'risk_signal']
   for (const type of orderedTypes) {
     if (!filters.nodeTypes[type]) continue
     for (const node of typedGroups[type]) {
@@ -430,18 +415,12 @@ function childSubtitle(type: keyof GraphFilterState['nodeTypes'], locale: string
     session: '会话',
     summary: '结论摘要',
     risk_signal: '风险信号',
-    symptom_event: '症状事件',
-    timeline_marker: '时间标记',
-    symptom: '症状',
     long_term: '长期特征',
   }
   const en: Record<string, string> = {
     session: 'Session',
     summary: 'Summary',
     risk_signal: 'Risk Signal',
-    symptom_event: 'Symptom Event',
-    timeline_marker: 'Timeline Marker',
-    symptom: 'Symptom',
     long_term: 'Long-term',
   }
   return locale.startsWith('zh') ? zh[type] || type : en[type] || type

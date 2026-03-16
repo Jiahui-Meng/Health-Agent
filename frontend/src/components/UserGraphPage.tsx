@@ -108,9 +108,6 @@ export default function UserGraphPage({
       session: true,
       summary: true,
       risk_signal: true,
-      symptom_event: true,
-      timeline_marker: true,
-      symptom: true,
       long_term: true,
     },
     sessionMode: 'all',
@@ -168,6 +165,88 @@ export default function UserGraphPage({
   }, [analysisRows.length, analyzingAssociations])
 
   const selectedNode = graphState?.nodes.find((node) => node.id === selectedNodeId) || null
+  const sessionDetailMap = useMemo(() => {
+    if (!userGraph) {
+      return new Map<
+        string,
+        {
+          summaryLabels: string[]
+          riskSignals: Array<{ label: string; risk: string }>
+          symptomEvents: string[]
+          symptoms: string[]
+          journey: Array<{ title: string; detail: string }>
+          associations: string[]
+        }
+      >()
+    }
+
+    const details = new Map<
+      string,
+      {
+        summaryLabels: string[]
+        riskSignals: Array<{ label: string; risk: string }>
+        symptomEvents: string[]
+        symptoms: string[]
+        journey: Array<{ title: string; detail: string }>
+        associations: string[]
+      }
+    >()
+
+    const sessionNodes = userGraph.nodes.filter((node) => node.node_type === 'session')
+    for (const sessionNode of sessionNodes) {
+      const sessionId = sessionNode.label
+      const sessionScopedNodes = userGraph.nodes.filter((node) => String((node.payload || {}).session_id || '') === sessionId)
+      const directSymptomIds = new Set(
+        userGraph.edges
+          .filter((edge) => edge.from_node_id === sessionNode.id)
+          .map((edge) => edge.to_node_id),
+      )
+      const directSymptoms = userGraph.nodes
+        .filter((node) => directSymptomIds.has(node.id) && node.node_type === 'symptom')
+        .map((node) => node.label)
+      const sessionNodeIds = new Set([sessionNode.id, ...sessionScopedNodes.map((node) => node.id), ...directSymptomIds])
+
+      details.set(sessionId, {
+        summaryLabels: sessionScopedNodes.filter((node) => node.node_type === 'summary').map((node) => node.label),
+        riskSignals: sessionScopedNodes
+          .filter((node) => node.node_type === 'risk_signal')
+          .map((node) => ({
+            label: node.label,
+            risk: String((node.payload || {}).risk_level || 'medium'),
+          })),
+        symptomEvents: sessionScopedNodes.filter((node) => node.node_type === 'symptom_event').map((node) => node.label),
+        symptoms: directSymptoms,
+        journey: (userGraph.summary_bundle.recent_journey || [])
+          .filter((item) => item.session_id === sessionId)
+          .map((item) => ({
+            title: item.title,
+            detail: item.detail,
+          })),
+        associations: userGraph.edges
+          .filter((edge) => {
+            if (!String(edge.edge_type).includes('POSSIBLY')) return false
+            const sourceSessions = Array.isArray(edge.payload?.source_session_ids)
+              ? edge.payload.source_session_ids.map((item) => String(item))
+              : []
+            return (
+              sourceSessions.includes(sessionId) ||
+              sessionNodeIds.has(edge.from_node_id) ||
+              sessionNodeIds.has(edge.to_node_id)
+            )
+          })
+          .map((edge) => String(edge.payload?.evidence_summary || edge.edge_type)),
+      })
+    }
+
+    return details
+  }, [userGraph])
+
+  const selectedSessionId =
+    selectedNode?.data.kind === 'session'
+      ? selectedNode.data.sessionId
+      : selectedNode?.data.sessionId
+  const selectedSession = selectedSessionId ? sessions.find((session) => session.id === selectedSessionId) : null
+  const selectedSessionDetail = selectedSessionId ? sessionDetailMap.get(selectedSessionId) : null
 
   const onNodeClick = useCallback(
     (_event: unknown, node: { id: string; data: GraphNodeData }) => {
@@ -204,9 +283,6 @@ export default function UserGraphPage({
         session: true,
         summary: true,
         risk_signal: true,
-        symptom_event: true,
-        timeline_marker: true,
-        symptom: true,
         long_term: true,
       },
     }))
@@ -462,7 +538,79 @@ export default function UserGraphPage({
                   </div>
                 )}
               </dl>
-              <pre>{JSON.stringify(selectedNode.data.payload || {}, null, 2)}</pre>
+              {selectedSession && selectedSessionDetail ? (
+                <div className="graph-session-detail">
+                  <div className="graph-session-detail-block">
+                    <h4>{locale.startsWith('zh') ? '会话时间' : 'Session Time'}</h4>
+                    <p>{new Date(selectedSession.updated_at).toLocaleString(locale)}</p>
+                  </div>
+                  {selectedSessionDetail.summaryLabels.length > 0 && (
+                    <div className="graph-session-detail-block">
+                      <h4>{locale.startsWith('zh') ? '结论摘要' : 'Summary'}</h4>
+                      <ul>
+                        {selectedSessionDetail.summaryLabels.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {selectedSessionDetail.riskSignals.length > 0 && (
+                    <div className="graph-session-detail-block">
+                      <h4>{locale.startsWith('zh') ? '风险信号' : 'Risk Signals'}</h4>
+                      <ul>
+                        {selectedSessionDetail.riskSignals.map((item) => (
+                          <li key={`${item.label}-${item.risk}`}>{item.label} ({item.risk})</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {selectedSessionDetail.journey.length > 0 && (
+                    <div className="graph-session-detail-block">
+                      <h4>{locale.startsWith('zh') ? '病程演化' : 'Journey'}</h4>
+                      <ul>
+                        {selectedSessionDetail.journey.map((item) => (
+                          <li key={`${item.title}-${item.detail}`}>
+                            <strong>{item.title}</strong>
+                            {item.detail ? ` · ${item.detail}` : ''}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {selectedSessionDetail.symptomEvents.length > 0 && (
+                    <div className="graph-session-detail-block">
+                      <h4>{locale.startsWith('zh') ? '症状事件' : 'Symptom Events'}</h4>
+                      <ul>
+                        {selectedSessionDetail.symptomEvents.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {selectedSessionDetail.symptoms.length > 0 && (
+                    <div className="graph-session-detail-block">
+                      <h4>{locale.startsWith('zh') ? '症状标签' : 'Symptoms'}</h4>
+                      <ul>
+                        {selectedSessionDetail.symptoms.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {selectedSessionDetail.associations.length > 0 && (
+                    <div className="graph-session-detail-block">
+                      <h4>{locale.startsWith('zh') ? '相关关联' : 'Associations'}</h4>
+                      <ul>
+                        {selectedSessionDetail.associations.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <pre>{JSON.stringify(selectedNode.data.payload || {}, null, 2)}</pre>
+              )}
             </div>
           ) : (
             <p>{copy.noSelection}</p>

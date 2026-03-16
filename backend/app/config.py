@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     oauth_cli_bin: str = "codex"
     model_timeout_seconds: int = 45
     mcp_mode: str = "stdio"
+    prompts_dir: str = "prompts"
+    prompt_locale_fallback: str = "en"
 
     context_turn_limit: int = 6
     max_context_chars: int = 5000

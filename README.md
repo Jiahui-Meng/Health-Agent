@@ -153,6 +153,16 @@ Default values:
 - `HEALTH_AGENT_MODEL_BASE_URL=https://api.openai.com/v1`
 - `HEALTH_AGENT_MODEL_NAME=gpt-5.4`
 
+Prompt packs:
+
+- Prompt files are loaded from `backend/prompts/{zh|en}`.
+- System prompt is assembled in fixed order:
+  `role.md -> policy.md -> user.md -> data_availability.md -> output.md`
+- `user.md` is template-based and only carries minimal user card fields.
+- Configure with:
+  - `HEALTH_AGENT_PROMPTS_DIR=prompts`
+  - `HEALTH_AGENT_PROMPT_LOCALE_FALLBACK=en`
+
 ### 中文
 
 当前支持两种模型接入方式：
@@ -177,6 +187,16 @@ Default values:
 - `HEALTH_AGENT_PROVIDER_MODE=codex_cli`
 - `HEALTH_AGENT_MODEL_BASE_URL=https://api.openai.com/v1`
 - `HEALTH_AGENT_MODEL_NAME=gpt-5.4`
+
+Prompt 文件说明：
+
+- Prompt 文件目录：`backend/prompts/{zh|en}`
+- System prompt 按固定顺序拼接：
+  `role.md -> policy.md -> user.md -> data_availability.md -> output.md`
+- `user.md` 使用模板变量，仅承载最小用户身份卡，不放全量历史。
+- 可通过以下变量配置：
+  - `HEALTH_AGENT_PROMPTS_DIR=prompts`
+  - `HEALTH_AGENT_PROMPT_LOCALE_FALLBACK=en`
 
 ## Tests
 

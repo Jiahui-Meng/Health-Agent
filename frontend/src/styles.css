@@ -835,9 +835,8 @@ button:disabled {
   background: #fff7f5;
 }
 
-.graph-node-symptom_event,
-.graph-node-symptom,
-.graph-node-timeline_marker,
+.graph-node-summary,
+.graph-node-risk_signal,
 .graph-node-long_term {
   background: #fcfdfc;
 }
@@ -871,6 +870,31 @@ button:disabled {
   margin-top: 6px;
   font-size: 0.76rem;
   color: #466157;
+}
+
+.graph-session-detail {
+  display: grid;
+  gap: 12px;
+}
+
+.graph-session-detail-block {
+  border-top: 1px solid rgba(18, 38, 32, 0.1);
+  padding-top: 10px;
+}
+
+.graph-session-detail-block h4 {
+  margin: 0 0 6px;
+  font-size: 0.88rem;
+}
+
+.graph-session-detail-block p,
+.graph-session-detail-block ul {
+  margin: 0;
+  color: #28493f;
+}
+
+.graph-session-detail-block ul {
+  padding-left: 18px;
 }
 
 .graph-node-badge {

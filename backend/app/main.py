@@ -62,6 +62,7 @@ from .services.graph_service import (
 from .services.association_builder import replace_model_analysis_edges
 from .services.output_parser import parse_model_json
 from .services.prompt_builder import build_codex_mcp_prompt, build_system_prompt, build_user_prompt
+from .services.prompt_pack import validate_prompt_pack_files
 from .services.export_report import build_export_context, build_export_report_messages, compose_full_markdown_report
 from .services.safety import (
     build_emergency_guidance,
@@ -120,6 +121,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         Base.metadata.create_all(bind=engine)
         _ensure_sessions_triage_columns(engine)
         _ensure_runtime_config_columns(engine)
+        validate_prompt_pack_files()
 
         with session_factory() as db:
             runtime_config = _ensure_runtime_config_row(db, app_settings)
@@ -599,7 +601,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             target_stage = forced_stage or current_stage
             provider = _normalize_provider_mode(runtime_config.provider_mode)
-            system_prompt = build_system_prompt(payload.locale, target_stage)
+            user_card = {
+                "username": user_record.username if user_record else "",
+                "sex": (session_record.health_profile or {}).get("sex") or (user_record.sex if user_record else ""),
+                "birth_year": user_record.birth_year if user_record else "",
+                "region_code": payload.region_code,
+                "conditions": (session_record.health_profile or {}).get("conditions")
+                or (_persistent_values(db, user_record.id, "condition") if user_record else []),
+                "medications": (session_record.health_profile or {}).get("medications")
+                or (_persistent_values(db, user_record.id, "medication") if user_record else []),
+                "allergies": (session_record.health_profile or {}).get("allergies")
+                or (_persistent_values(db, user_record.id, "allergy") if user_record else []),
+                "core_history_summary": context.summary or session_record.summary or "",
+            }
+            system_prompt = build_system_prompt(payload.locale, target_stage, user_card=user_card)
             if provider == "codex_cli":
                 user_prompt = build_codex_mcp_prompt(
                     locale=payload.locale,

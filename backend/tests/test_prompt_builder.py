@@ -5,18 +5,21 @@ from app.services.prompt_builder import build_codex_mcp_prompt, build_system_pro
 
 
 def test_build_system_prompt_bilingual():
-    zh_prompt = build_system_prompt("zh-CN", "intake")
-    en_prompt = build_system_prompt("en-US", "conclusion")
+    zh_prompt = build_system_prompt("zh-CN", "intake", user_card={"username": "alice", "sex": "female"})
+    en_prompt = build_system_prompt("en-US", "conclusion", user_card={"username": "bob", "sex": "male"})
 
     assert "JSON" in zh_prompt
-    assert "no" in en_prompt.lower() and "prescription" in en_prompt.lower()
+    assert "prescription" in en_prompt.lower()
     assert "intake" in zh_prompt.lower()
     assert "conclusion" in en_prompt.lower()
-    assert "风险等级说明" in zh_prompt
+    assert "alice" in zh_prompt
+    assert "bob" in en_prompt
     assert "advice_sections" in zh_prompt
     assert "advice_sections" in en_prompt
-    assert "性别约束" in zh_prompt or "性别" in zh_prompt
-    assert "profile guardrails" in en_prompt.lower() or "sex-specific" in en_prompt.lower()
+    assert "性别" in zh_prompt
+    assert "guardrails" in en_prompt.lower()
+    assert "data_availability.md" in zh_prompt
+    assert "data_availability.md" in en_prompt
 
 
 def test_build_user_prompt_contains_profile_and_context():
@@ -66,4 +69,5 @@ def test_build_codex_mcp_prompt_contains_tool_instructions():
     data = json.loads(prompt)
     assert data["session_id"] == "session-1"
     assert any("get_session_context" in rule for rule in data["rules"])
+    assert any("sufficient" in rule.lower() for rule in data["rules"])
     assert data["triage_stage"] == "intake"
